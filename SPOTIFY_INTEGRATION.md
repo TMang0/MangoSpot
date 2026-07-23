@@ -128,16 +128,96 @@ Produce `build-cspot-switch/libcspot.a` y `build-cspot-switch/bell/libbell.a`.
    TrackPlayer/TrackQueue/CDNAudioFile/MercurySession/Shannon/mbedTLS/
    sockets) y **linkea sin errores** (`linktest.elf`). Este es el riesgo
    técnico más grande del proyecto y ya está confirmado que funciona.
-3. Escribir `SwitchAudioSink` real (hoy es un stub en `linktest/main.cpp`)
-   usando SDL2 (`SDL_QueueAudio`), ya que el proyecto ya usa SDL2 para todo
-   lo demás.
-4. Mover la integración del proyecto descartable `linktest/` al Makefile
-   real (`source/`), sumando `libcspot.a`/`libbell.a`/libs de códecs a
-   `LIBS`/`LIBPATHS`, para producir un `.nro` real (no solo un `.elf` de
-   prueba).
-5. Implementar login usuario/contraseña con `swkbd` + cache del auth blob en
-   la SD, y un flujo mínimo de prueba (reproducir algo real desde el celular
-   con la Switch como dispositivo Connect).
+3. ~~Escribir `SwitchAudioSink` real~~ **HECHO** — `source/spotify/SwitchAudioSink.{h,cpp}`,
+   usa un `SDL_AudioDeviceID` propio (independiente del que abre
+   `Mix_OpenAudio`) con `SDL_QueueAudio`, con backpressure simple (~2s de
+   buffer máximo).
+4. ~~Mover la integración al Makefile real~~ **HECHO** — `source/spotify/SpotifyClient.{h,cpp}`
+   (login usuario/contraseña, sesión, hilos de red y de audio, todo
+   modelado 1:1 sobre el target CLI oficial de cspot) + cambios en el
+   `Makefile` raíz (ver más abajo) + `main.c` llama a `spotify_client_start()`
+   al arrancar. **`make` genera un `spotiswitch.nro` real con todo
+   incluido.**
+5. Implementar login con `swkbd` (teclado en pantalla) + cache del auth blob
+   en la SD — hoy el login lee usuario/contraseña de un archivo de texto
+   plano en la SD (ver sección "Probarlo" abajo). Es un atajo deliberado para
+   tener un prototipo cuanto antes; `swkbd` queda como mejora de UX.
 6. Enganchar los controles existentes (Joy-Con / mini-player) al estado real
-   de reproducción en vez del mock.
+   de reproducción en vez del mock — hoy el mock (`mock_data.c`) y Spotify
+   corren en paralelo, sin tocarse.
+
+## Estado actual — Fase 1: COMPLETA (prototipo listo para probar)
+
+### Cambios en el Makefile
+
+- `SOURCES` ahora incluye `source/spotify`.
+- Se agregó globbing de `.cpp` (`CPPFILES`), antes solo compilaba `.c`.
+- `CXXFLAGS` ya no tiene `-fno-rtti -fno-exceptions` (cspot los necesita:
+  `LoginBlob`, `nlohmann::json`, etc. usan excepciones) y suma `-std=gnu++20`
+  + los `-I` de cspot/bell (nanopb, fmt, tremor, nlohmann_json, y los headers
+  de protobuf generados en `build-cspot-switch/`).
+- `LIBS` suma, al principio: `-lcspot -lbell -lopencore-aacdec -lopus
+  -lmbedtls -lmbedx509 -lmbedcrypto`.
+- `LIBPATHS` suma los 4 directorios de `build-cspot-switch/` (raíz,
+  `bell/`, `bell/external/opus/`, `bell/external/opencore-aacdec/`).
+- `LDFLAGS` suma `-Wl,--allow-multiple-definition`: bell vendoriza su propia
+  copia de `libogg` (via tremor, para Vorbis de punto fijo) que duplica
+  símbolos (`ogg_page_version`, etc.) con el portlib `-logg` que ya usaba el
+  proyecto para reproducción local. Ambas copias son ABI-compatibles; el
+  flag solo le dice al linker que se quede con la primera que encuentre.
+
+**Importante**: antes de correr `make` en este proyecto hace falta tener
+`build-cspot-switch/` ya compilado (ver comando más arriba) — el Makefile
+NO dispara ese build por sí solo todavía (posible mejora futura: un target
+`cspot-libs` que lo automatice).
+
+### Arquitectura del código nuevo (`source/spotify/`)
+
+- `SwitchAudioSink.{h,cpp}`: implementa `AudioSink::feedPCMFrames` con
+  `SDL_QueueAudio` sobre un `SDL_AudioDeviceID` propio.
+- `SpotifyClient.{h,cpp}`: API en C (`spotify_client_start()`,
+  `spotify_client_get_now_playing()`) que por dentro arma, en espejo casi
+  exacto del target CLI oficial de cspot (`targets/cli/main.cpp` +
+  `CliPlayer.cpp`):
+  - `LoginBlob` (usuario/contraseña) → `Context::createFromBlob` →
+    `session->connectWithRandomAp()` → `session->authenticate()`.
+  - `SpircHandler` + dos hilos propios (clases `bell::Task`):
+    - `SessionPumpTask`: bombea `session->handlePacket()` en loop (el CLI
+      oficial hace esto en el hilo principal con un `while` bloqueante; acá
+      no podemos bloquear el hilo principal de SDL, así que va en su propio
+      hilo).
+    - `PlayerPumpTask`: bombea `CentralAudioBuffer` → `BellDSP` →
+      `AudioSink`, réplica de `CliPlayer::runTask()`.
+- `main.c` llama a `socketInitializeDefault()` + `nxlinkStdio()` (para poder
+  ver los `printf` con `nxlink -s`) y luego `spotify_client_start()` justo
+  después de abrir el audio, antes de crear la ventana. Si falla (por
+  ejemplo no existe el archivo de credenciales), solo imprime un mensaje y
+  el resto de la app sigue funcionando normal con la library mock.
+
+### Cómo probarlo (falta hacer esto en hardware real)
+
+1. En la SD de la Switch, crear `sdmc:/switch/spotiswitch/login.txt` con:
+   ```
+   tu_usuario_de_spotify
+   tu_contraseña
+   ```
+   (dos líneas, sin comillas). Ojo: si tu cuenta usa login de
+   Facebook/Google/Apple, hay que setear una contraseña "normal" desde la
+   configuración de la cuenta de Spotify primero.
+2. Copiar `spotiswitch.nro` a la SD (por ej. `sdmc:/switch/spotiswitch.nro`)
+   y correrlo desde el homebrew menu, o con `nxlink -s spotiswitch.nro` para
+   además ver los logs por red.
+3. Si conecta bien, la Switch debería aparecer en el selector "Conectar a un
+   dispositivo" de la app de Spotify en el celular/PC — elegirla y darle
+   play a algo.
+4. Cosas sin probar todavía / posibles puntos de falla en hardware real (no
+   se pueden validar sin una Switch física):
+   - Comportamiento real de `pthread_create`/hilos de libnx bajo carga
+     (linkea bien, pero nunca se ejecutó).
+   - Abrir dos `SDL_AudioDeviceID` simultáneos (uno de `Mix_OpenAudio`, otro
+     del `SwitchAudioSink`) — no hay garantía de que el driver de audio de
+     Switch en SDL2 soporte esto sin probarlo.
+   - Permisos de red del homebrew (debería andar igual que cualquier NRO que
+     hace requests HTTP, pero no está confirmado en este proyecto puntual).
+
 

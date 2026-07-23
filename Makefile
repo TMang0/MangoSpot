@@ -9,7 +9,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET      := spotiswitch
 BUILD       := build
-SOURCES     := source source/ui source/player source/data source/render
+SOURCES     := source source/ui source/player source/data source/render source/spotify
 INCLUDES    := source
 ROMFS       := $(TOPDIR)/romfs
 
@@ -20,11 +20,44 @@ APP_VERSION := 0.1.0
 ARCH        := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS      := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
 CFLAGS      += $(INCLUDE) -D__SWITCH__
-CXXFLAGS    := $(CFLAGS) -fno-rtti -fno-exceptions
+# cspot needs RTTI/exceptions (LoginBlob, nlohmann::json, etc.) and C++20.
+CXXFLAGS    := $(CFLAGS) -std=gnu++20
 ASFLAGS     := -g $(ARCH)
-LDFLAGS     := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# --allow-multiple-definition: bell vendors its own copy of libogg's framing.c
+# (via tremor, for fixed-point Vorbis) which duplicates symbols already
+# provided by the portlib -logg used for local mock playback. Both copies are
+# ABI compatible; this just tells the linker to keep the first one it sees.
+LDFLAGS     := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--allow-multiple-definition
 
-LIBS := -lSDL2_mixer \
+# cspot (Spotify Connect client) is built separately via CMake against
+# devkitpro/cmake/Switch.cmake - see SPOTIFY_INTEGRATION.md for the build
+# command. We link the resulting static libs directly instead of migrating
+# this whole project's build to CMake.
+CSPOT_DIR      := $(TOPDIR)/external/cspot/cspot
+CSPOT_BELL     := $(CSPOT_DIR)/bell
+CSPOT_BUILD    := $(TOPDIR)/build-cspot-switch
+
+CSPOT_INCLUDE  := -I$(CSPOT_DIR)/include \
+                  -I$(CSPOT_BUILD) \
+                  -I$(CSPOT_BELL)/main/audio-sinks/include \
+                  -I$(CSPOT_BELL)/main/audio-dsp/include \
+                  -I$(CSPOT_BELL)/main/utilities/include \
+                  -I$(CSPOT_BELL)/main/io/include \
+                  -I$(CSPOT_BELL)/main/platform \
+                  -I$(CSPOT_BELL)/external/nanopb \
+                  -I$(CSPOT_BELL)/external/nlohmann_json/include \
+                  -I$(CSPOT_BELL)/external/fmt/include \
+                  -I$(CSPOT_BELL)/external/tremor
+
+CSPOT_LIBPATHS := -L$(CSPOT_BUILD) \
+                  -L$(CSPOT_BUILD)/bell \
+                  -L$(CSPOT_BUILD)/bell/external/opus \
+                  -L$(CSPOT_BUILD)/bell/external/opencore-aacdec
+
+CXXFLAGS       += $(CSPOT_INCLUDE)
+
+LIBS := -lcspot -lbell -lopencore-aacdec -lopus -lmbedtls -lmbedx509 -lmbedcrypto \
+        -lSDL2_mixer \
         -lmpg123 -lvorbisfile -lvorbis -lopusfile -lopus -lmodplug \
         -lSDL2_ttf -lSDL2_image -lSDL2 \
         -lharfbuzz -lfreetype \
@@ -42,14 +75,15 @@ export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 export DEPSDIR  := $(CURDIR)/$(BUILD)
 
 CFILES      := $(foreach dir,$(SOURCES),$(wildcard $(CURDIR)/$(dir)/*.c))
+CPPFILES    := $(foreach dir,$(SOURCES),$(wildcard $(CURDIR)/$(dir)/*.cpp))
 SFILES      := $(foreach dir,$(SOURCES),$(wildcard $(CURDIR)/$(dir)/*.s))
 
 export LD       := $(CXX)
-export OFILES   := $(notdir $(CFILES:.c=.o)) $(notdir $(SFILES:.s=.o))
+export OFILES   := $(notdir $(CFILES:.c=.o)) $(notdir $(CPPFILES:.cpp=.o)) $(notdir $(SFILES:.s=.o))
 export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                    $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
                    -I$(CURDIR)/$(BUILD)
-export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS := $(CSPOT_LIBPATHS) $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 export APP_ICON := $(TOPDIR)/icon.jpg
 

@@ -6,10 +6,18 @@
 #include "render/render.h"
 #include "player/player.h"
 #include "ui/ui.h"
+#include "spotify/SpotifyClient.h"
 
 int main(int argc, char* argv[]) {
+    socketInitializeDefault();
+    nxlinkStdio();  // stream printf/stderr to `nxlink -s` while debugging
+
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_AUDIO);
     Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096);
+
+    if (spotify_client_start() != 0) {
+        printf("main: Spotify Connect not started (see message above)\n");
+    }
 
     SDL_Window* window = SDL_CreateWindow(
         "Spotify Switch", 0, 0, 0, 0,
@@ -66,5 +74,6 @@ done:
     SDL_DestroyWindow(window);
     Mix_CloseAudio();
     SDL_Quit();
+    socketExit();
     return 0;
 }
