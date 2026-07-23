@@ -5,3 +5,4 @@ build/
 .DS_Store
 .venv-tools/
 build-cspot-switch/
+build-linktest/

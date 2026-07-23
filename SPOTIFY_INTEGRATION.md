@@ -99,25 +99,45 @@ cmake --build build-cspot-switch -j8
 
 Produce `build-cspot-switch/libcspot.a` y `build-cspot-switch/bell/libbell.a`.
 
+- **Shim de plataforma `switch` para bell escrito y funcionando**:
+  `WrappedSemaphore` (libnx NO implementa `sem_init`/`sem_wait` de POSIX pese
+  a tener el header — hubo que escribirlo a mano sobre `Mutex`+`CondVar`
+  nativos de libnx). `MDNSService` confirmado innecesario por ahora (solo lo
+  usa el flujo de Zeroconf pairing, que no vamos a implementar todavía).
+- **Prueba de linkeo end-to-end exitosa**: proyecto descartable en
+  `linktest/` arma una sesión real (`LoginBlob → Context → SpircHandler`) y
+  **linkea sin errores** para aarch64/devkitA64. Este era el riesgo técnico
+  más grande de todo el proyecto y ya está confirmado:
+  ```sh
+  source .venv-tools/bin/activate
+  cmake -S linktest -B build-linktest -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  cmake --build build-linktest -j8
+  ```
+
 ### Falta (próximos pasos, en orden)
 
-1. Escribir el shim de plataforma "switch" para bell (solo 2 archivos, por el
-   patrón que ya usan linux/apple):
-   - `WrappedSemaphore.cpp` (semáforo — probablemente `sem_init`/`sem_wait`
-     de newlib funcionen tal cual, hay que confirmarlo).
-   - `MDNSService.cpp` (Zeroconf — se puede posponer si arrancamos con login
-     usuario/contraseña en vez de "tap to pair").
-   - Agregar la rama `if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")` en
-     `bell/CMakeLists.txt` para compilar esos archivos.
-2. Escribir `SwitchAudioSink` (nuevo, no existe en cspot upstream) que
-   implemente `feedPCMFrames` usando SDL2 (`SDL_QueueAudio`) ya que el
-   proyecto ya usa SDL2 para todo lo demás.
-3. Decidir cómo linkear: compilar `libcspot.a`/`libbell.a` (y sus libs de
-   codecs) por separado con CMake, y sumarlos a `LIBS`/`LIBPATHS` del
-   Makefile existente (opción elegida — no migramos el proyecto entero a
-   CMake).
-4. Implementar login usuario/contraseña con `swkbd` + cache del auth blob en
+1. ~~Escribir el shim de plataforma "switch" para bell~~ **HECHO** —
+   `WrappedSemaphore` implementado sobre `Mutex`+`CondVar` nativos de libnx
+   (libnx NO tiene una implementación real de `sem_init`/`sem_wait` de POSIX
+   pese a que el header existe — hubo que escribir la sincronización a mano).
+   `MDNSService` se confirmó opcional: solo lo usa `ZeroconfAuthenticator` en
+   el target CLI de cspot, no el núcleo (`SpircHandler`/`Session`/etc.), así
+   que no hace falta todavía (login usuario/contraseña no lo requiere).
+2. ~~Prueba de linkeo end-to-end~~ **HECHO** — proyecto CMake descartable en
+   `linktest/` que arma `LoginBlob → Context → SpircHandler` (esto arrastra
+   TrackPlayer/TrackQueue/CDNAudioFile/MercurySession/Shannon/mbedTLS/
+   sockets) y **linkea sin errores** (`linktest.elf`). Este es el riesgo
+   técnico más grande del proyecto y ya está confirmado que funciona.
+3. Escribir `SwitchAudioSink` real (hoy es un stub en `linktest/main.cpp`)
+   usando SDL2 (`SDL_QueueAudio`), ya que el proyecto ya usa SDL2 para todo
+   lo demás.
+4. Mover la integración del proyecto descartable `linktest/` al Makefile
+   real (`source/`), sumando `libcspot.a`/`libbell.a`/libs de códecs a
+   `LIBS`/`LIBPATHS`, para producir un `.nro` real (no solo un `.elf` de
+   prueba).
+5. Implementar login usuario/contraseña con `swkbd` + cache del auth blob en
    la SD, y un flujo mínimo de prueba (reproducir algo real desde el celular
    con la Switch como dispositivo Connect).
-5. Enganchar los controles existentes (Joy-Con / mini-player) al estado real
+6. Enganchar los controles existentes (Joy-Con / mini-player) al estado real
    de reproducción en vez del mock.
+
