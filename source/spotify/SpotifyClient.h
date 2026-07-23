@@ -12,7 +12,7 @@ typedef struct {
   int is_connected; // 1 once login + session are up
 } SpotifyNowPlaying;
 
-// Reads credentials from sdmc:/switch/spotiswitch/login.txt (line 1:
+// Reads credentials from sdmc:/switch/mangospot/login.txt (line 1:
 // username, line 2: password), logs into Spotify, and spins up background
 // threads for the network session and audio playback. This is a blocking
 // call (it performs the network handshake before returning) meant to be

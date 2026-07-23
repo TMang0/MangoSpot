@@ -24,7 +24,7 @@
 
 namespace {
 
-constexpr const char* kCredentialsPath = "sdmc:/switch/spotiswitch/login.txt";
+constexpr const char* kCredentialsPath = "sdmc:/switch/mangospot/login.txt";
 
 std::mutex gNowPlayingMutex;
 SpotifyNowPlaying gNowPlaying = {};
@@ -197,7 +197,7 @@ int spotify_client_start(void) {
     return 1;
   }
 
-  auto loginBlob = std::make_shared<cspot::LoginBlob>("Spotiswitch");
+  auto loginBlob = std::make_shared<cspot::LoginBlob>("MangoSpot");
   loginBlob->loadUserPass(username, password);
 
   gContext = cspot::Context::createFromBlob(loginBlob);

@@ -18,7 +18,7 @@ class SwitchAudioSinkStub : public AudioSink {
 };
 
 int main() {
-  auto blob = std::make_shared<cspot::LoginBlob>("spotiswitch");
+  auto blob = std::make_shared<cspot::LoginBlob>("MangoSpot");
   blob->loadUserPass("user", "pass");
 
   auto ctx = cspot::Context::createFromBlob(blob);

@@ -1,4 +1,4 @@
-# spotiswitch
+# MangoSpot
 
 Homebrew para Nintendo Switch que convierte la consola en un reproductor de
 música con una librería local y, en desarrollo activo, un receptor real de
@@ -50,7 +50,7 @@ encaja directamente con el toolchain `devkitA64` que ya usa este proyecto.
 
 ## Descripción del proyecto
 
-spotiswitch es una app de homebrew para Switch con dos partes:
+MangoSpot es una app de homebrew para Switch con dos partes:
 
 1. **Reproductor local**: navegación de una librería de álbumes/canciones
    (hoy con datos de prueba en `source/data/mock_data.c`) con una UI

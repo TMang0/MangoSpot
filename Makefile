@@ -7,13 +7,13 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
-TARGET      := spotiswitch
+TARGET      := mangospot
 BUILD       := build
 SOURCES     := source source/ui source/player source/data source/render source/spotify
 INCLUDES    := source
 ROMFS       := $(TOPDIR)/romfs
 
-APP_TITLE   := Spotify Switch
+APP_TITLE   := MangoSpot
 APP_AUTHOR  := Manuel
 APP_VERSION := 0.1.0
 

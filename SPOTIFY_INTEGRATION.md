@@ -1,4 +1,4 @@
-# Integración de Spotify en spotiswitch
+# Integración de Spotify en MangoSpot
 
 Plan de trabajo para agregar un cliente/receptor de Spotify Connect real a la
 app, reemplazando la librería mock (`source/data/mock_data.c`).
@@ -18,7 +18,7 @@ Arquitectura resultante:
 
 ```mermaid
 flowchart LR
-    subgraph Switch["spotiswitch (NRO)"]
+    subgraph Switch["MangoSpot (NRO)"]
         UI[ui/ existente] --> Player[player.c]
         Player --> Sink[SwitchAudioSink nuevo]
         Sink --> cspot[libcspot.a + libbell.a]
@@ -136,7 +136,7 @@ Produce `build-cspot-switch/libcspot.a` y `build-cspot-switch/bell/libbell.a`.
    (login usuario/contraseña, sesión, hilos de red y de audio, todo
    modelado 1:1 sobre el target CLI oficial de cspot) + cambios en el
    `Makefile` raíz (ver más abajo) + `main.c` llama a `spotify_client_start()`
-   al arrancar. **`make` genera un `spotiswitch.nro` real con todo
+   al arrancar. **`make` genera un `mangospot.nro` real con todo
    incluido.**
 5. Implementar login con `swkbd` (teclado en pantalla) + cache del auth blob
    en la SD — hoy el login lee usuario/contraseña de un archivo de texto
@@ -196,7 +196,7 @@ NO dispara ese build por sí solo todavía (posible mejora futura: un target
 
 ### Cómo probarlo (falta hacer esto en hardware real)
 
-1. En la SD de la Switch, crear `sdmc:/switch/spotiswitch/login.txt` con:
+1. En la SD de la Switch, crear `sdmc:/switch/mangospot/login.txt` con:
    ```
    tu_usuario_de_spotify
    tu_contraseña
@@ -204,8 +204,8 @@ NO dispara ese build por sí solo todavía (posible mejora futura: un target
    (dos líneas, sin comillas). Ojo: si tu cuenta usa login de
    Facebook/Google/Apple, hay que setear una contraseña "normal" desde la
    configuración de la cuenta de Spotify primero.
-2. Copiar `spotiswitch.nro` a la SD (por ej. `sdmc:/switch/spotiswitch.nro`)
-   y correrlo desde el homebrew menu, o con `nxlink -s spotiswitch.nro` para
+2. Copiar `mangospot.nro` a la SD (por ej. `sdmc:/switch/mangospot.nro`)
+   y correrlo desde el homebrew menu, o con `nxlink -s mangospot.nro` para
    además ver los logs por red.
 3. Si conecta bien, la Switch debería aparecer en el selector "Conectar a un
    dispositivo" de la app de Spotify en el celular/PC — elegirla y darle

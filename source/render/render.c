@@ -3,7 +3,7 @@
 #include <string.h>
 
 int render_init(RenderCtx* ctx, SDL_Window* window) {
-    FILE* log = fopen("sdmc:/switch/spotiswitch/debug.log", "a");
+    FILE* log = fopen("sdmc:/switch/mangospot/debug.log", "a");
 
     ctx->renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!ctx->renderer) {
@@ -20,8 +20,8 @@ int render_init(RenderCtx* ctx, SDL_Window* window) {
     }
     fprintf(log, "TTF OK\n"); fflush(log);
 
-    const char* path_regular = "sdmc:/switch/spotiswitch/fonts/font.ttf";
-    const char* path_bold    = "sdmc:/switch/spotiswitch/fonts/font-bold.ttf";
+    const char* path_regular = "sdmc:/switch/mangospot/fonts/font.ttf";
+    const char* path_bold    = "sdmc:/switch/mangospot/fonts/font-bold.ttf";
 
     fprintf(log, "intentando abrir: %s\n", path_regular); fflush(log);
     ctx->font_regular = TTF_OpenFont(path_regular, 24);
