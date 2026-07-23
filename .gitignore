@@ -3,3 +3,5 @@ build/
 *.nro
 *.nacp
 .DS_Store
+.venv-tools/
+build-cspot-switch/

@@ -1,0 +1,3 @@
+[submodule "external/cspot"]
+	path = external/cspot
+	url = https://github.com/feelfreelinux/cspot
