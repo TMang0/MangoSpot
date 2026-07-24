@@ -6,3 +6,7 @@ build/
 .venv-tools/
 build-cspot-switch/
 build-linktest/
+login.txt
+*credentials*
+*.secret
+.env

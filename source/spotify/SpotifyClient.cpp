@@ -1,6 +1,7 @@
 #include "SpotifyClient.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -191,8 +192,27 @@ bool readCredentials(std::string& username, std::string& password) {
     return false;
   }
 
-  if (!std::getline(file, username) || !std::getline(file, password) ||
-      username.empty() || password.empty()) {
+  auto trimTrailingWhitespace = [](std::string& s) {
+    // Strips a trailing \r (CRLF line endings) and any other stray
+    // whitespace, which would otherwise get silently sent as part of the
+    // username/password and cause a confusing "Authorization declined".
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+      s.pop_back();
+    }
+  };
+
+  if (!std::getline(file, username) || !std::getline(file, password)) {
+    printf(
+        "SpotifyClient: %s must have username on line 1, password on line "
+        "2\n",
+        kCredentialsPath);
+    return false;
+  }
+
+  trimTrailingWhitespace(username);
+  trimTrailingWhitespace(password);
+
+  if (username.empty() || password.empty()) {
     printf(
         "SpotifyClient: %s must have username on line 1, password on line "
         "2\n",
