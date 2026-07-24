@@ -220,4 +220,43 @@ NO dispara ese build por sí solo todavía (posible mejora futura: un target
    - Permisos de red del homebrew (debería andar igual que cualquier NRO que
      hace requests HTTP, pero no está confirmado en este proyecto puntual).
 
+## ACTUALIZACIÓN (2026-07-24): el login usuario/contraseña de arriba ya NO se usa
+
+Probado en hardware real: el crash de antes se solucionó (el fix de
+excepciones aguantó), pero Spotify respondió **"Authorization declined"**
+después de un handshake Shannon exitoso. Confirmado con la wiki oficial de
+`librespot`: **el login clásico usuario/contraseña está deprecado y
+bloqueado por Spotify del lado del servidor**, para cualquier cliente tipo
+librespot/cspot, en cualquier cuenta. No es arreglable desde nuestro lado.
+
+`cspot` no tiene un flujo de OAuth propio (a diferencia del librespot
+moderno en Rust). La única alternativa real que sigue funcionando es
+**Zeroconf / "tocar para vincular"**, y ya está implementada:
+
+- `bell/main/platform/switch/MDNSService.cpp` (nuevo) — anuncia la Switch
+  por mDNS usando la librería `mdnssvc` ya vendorizada, obteniendo la IP
+  local vía `nifmGetCurrentIpAddress` de libnx (no vía `getifaddrs`, que no
+  existe en libnx).
+- `ZeroconfHttpServer` (dentro de `SpotifyClient.cpp`) — un servidor HTTP
+  mínimo escrito a mano (sockets crudos), NO usamos `BellHTTPServer`/civetweb
+  de bell porque civetweb asume un entorno POSIX mucho más completo
+  (`grp.h`, `pwd.h`, `sys/wait.h`) que no vale la pena portar para el único
+  endpoint que necesitamos (`GET`/`POST /spotify_info`).
+- `LoginCompletionTask` — espera a que el celular complete el pairing y
+  recién ahí hace el `connectWithRandomAp`/`authenticate`/arranca la sesión
+  (en su propio hilo, para no demorar la respuesta HTTP al celular).
+
+### Cómo probarlo ahora
+1. Copiar `mangospot.nro` a la SD y correrlo (con `nxlink -a <ip-de-la-switch> -s mangospot.nro`
+   para ver los logs — el descubrimiento por broadcast de `nxlink` puede
+   fallar por aislamiento de clientes en el router; usar `-a` con la IP que
+   muestra la pantalla de Netloader de hbmenu).
+2. En el celular/PC, abrir la app de Spotify — la Switch debería aparecer
+   sola como "MangoSpot" en el selector de dispositivos (sin escribir
+   usuario ni contraseña en ningún lado).
+3. Elegirla y darle play a algo.
+
+Ya no hace falta el archivo `login.txt` en la SD — ese flujo fue eliminado
+por completo.
+
 

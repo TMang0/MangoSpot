@@ -1,10 +1,16 @@
 #include "SpotifyClient.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
-#include <fstream>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +23,7 @@
 #include "CSpotContext.h"
 #include "CentralAudioBuffer.h"
 #include "LoginBlob.h"
+#include "MDNSService.h"
 #include "SpircHandler.h"
 #include "StreamInfo.h"
 #include "SwitchAudioSink.h"
@@ -25,7 +32,13 @@
 
 namespace {
 
-constexpr const char* kCredentialsPath = "sdmc:/switch/mangospot/login.txt";
+// Spotify's official apps discover Connect receivers via mDNS
+// (_spotify-connect._tcp) and then hit this HTTP endpoint on the
+// advertised port to hand over already-authenticated credentials. Plain
+// username/password login is deprecated/blocked by Spotify's servers (see
+// librespot's own docs), so this Zeroconf "tap to pair" flow is the only
+// login method cspot actually supports that still works.
+constexpr int kZeroconfPort = 7864;
 
 std::mutex gNowPlayingMutex;
 SpotifyNowPlaying gNowPlaying = {};
@@ -182,46 +195,245 @@ std::shared_ptr<cspot::SpircHandler> gHandler;
 std::unique_ptr<SessionPumpTask> gSessionPump;
 std::unique_ptr<PlayerPumpTask> gPlayerPump;
 
-bool readCredentials(std::string& username, std::string& password) {
-  std::ifstream file(kCredentialsPath);
-  if (!file.is_open()) {
-    printf("SpotifyClient: could not open %s\n", kCredentialsPath);
-    printf(
-        "SpotifyClient: create it on the SD card with your Spotify username "
-        "on line 1 and password on line 2\n");
-    return false;
+// Minimal single-endpoint HTTP server for Spotify's Zeroconf pairing
+// handshake (GET returns device info, POST delivers the credentials blob).
+// We deliberately don't use bell's own BellHTTPServer/civetweb: civetweb
+// assumes a much heavier POSIX environment (grp.h, pwd.h, sys/wait.h, ...)
+// that devkitA64/libnx doesn't provide, and porting it isn't worth it for
+// the one tiny endpoint we actually need.
+class ZeroconfHttpServer : public bell::Task {
+ public:
+  ZeroconfHttpServer(std::shared_ptr<cspot::LoginBlob> blobIn, int portIn)
+      : bell::Task("spotify_zeroconf_http", 1024 * 16, 0, 0),
+        blob(std::move(blobIn)),
+        port(portIn) {
+    startTask();
   }
 
-  auto trimTrailingWhitespace = [](std::string& s) {
-    // Strips a trailing \r (CRLF line endings) and any other stray
-    // whitespace, which would otherwise get silently sent as part of the
-    // username/password and cause a confusing "Authorization declined".
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
-      s.pop_back();
+  std::atomic<bool> paired = false;
+  std::atomic<bool> running = true;
+
+  void runTask() override {
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverFd < 0) {
+      printf("SpotifyClient: zeroconf socket() failed\n");
+      return;
     }
-  };
 
-  if (!std::getline(file, username) || !std::getline(file, password)) {
-    printf(
-        "SpotifyClient: %s must have username on line 1, password on line "
-        "2\n",
-        kCredentialsPath);
-    return false;
+    int yes = 1;
+    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(serverFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      printf("SpotifyClient: zeroconf bind() failed on port %d\n", port);
+      close(serverFd);
+      return;
+    }
+
+    if (listen(serverFd, 4) < 0) {
+      printf("SpotifyClient: zeroconf listen() failed\n");
+      close(serverFd);
+      return;
+    }
+
+    printf("SpotifyClient: zeroconf HTTP server listening on port %d\n",
+           port);
+
+    while (running) {
+      struct sockaddr_in clientAddr {};
+      socklen_t clientLen = sizeof(clientAddr);
+      int clientFd =
+          accept(serverFd, (struct sockaddr*)&clientAddr, &clientLen);
+      if (clientFd < 0) continue;
+
+      try {
+        handleConnection(clientFd);
+      } catch (const std::exception& e) {
+        printf("SpotifyClient: zeroconf request exception: %s\n", e.what());
+      } catch (...) {
+        printf("SpotifyClient: zeroconf request unknown exception\n");
+      }
+      close(clientFd);
+    }
+
+    close(serverFd);
   }
 
-  trimTrailingWhitespace(username);
-  trimTrailingWhitespace(password);
+ private:
+  std::shared_ptr<cspot::LoginBlob> blob;
+  int port;
 
-  if (username.empty() || password.empty()) {
-    printf(
-        "SpotifyClient: %s must have username on line 1, password on line "
-        "2\n",
-        kCredentialsPath);
-    return false;
+  static std::string urlDecode(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); i++) {
+      if (in[i] == '+') {
+        out += ' ';
+      } else if (in[i] == '%' && i + 2 < in.size()) {
+        int value = 0;
+        std::sscanf(in.substr(i + 1, 2).c_str(), "%x", &value);
+        out += static_cast<char>(value);
+        i += 2;
+      } else {
+        out += in[i];
+      }
+    }
+    return out;
   }
 
-  return true;
-}
+  static std::map<std::string, std::string> parseFormBody(
+      const std::string& body) {
+    std::map<std::string, std::string> result;
+    size_t pos = 0;
+    while (pos < body.size()) {
+      size_t amp = body.find('&', pos);
+      std::string pair = body.substr(
+          pos, amp == std::string::npos ? std::string::npos : amp - pos);
+      size_t eq = pair.find('=');
+      if (eq != std::string::npos) {
+        result[urlDecode(pair.substr(0, eq))] =
+            urlDecode(pair.substr(eq + 1));
+      }
+      if (amp == std::string::npos) break;
+      pos = amp + 1;
+    }
+    return result;
+  }
+
+  void sendJson(int fd, const std::string& body) {
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: application/json\r\n";
+    response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    response += "Connection: close\r\n\r\n";
+    response += body;
+    send(fd, response.data(), response.size(), 0);
+  }
+
+  void handleConnection(int fd) {
+    std::string request;
+    char buf[4096];
+    size_t headerEnd = std::string::npos;
+
+    while (headerEnd == std::string::npos) {
+      ssize_t n = recv(fd, buf, sizeof(buf), 0);
+      if (n <= 0) return;
+      request.append(buf, n);
+      headerEnd = request.find("\r\n\r\n");
+      if (request.size() > 32768) return;  // safety cap
+    }
+
+    size_t lineEnd = request.find("\r\n");
+    std::string requestLine = request.substr(0, lineEnd);
+    size_t methodEnd = requestLine.find(' ');
+    size_t pathEnd =
+        methodEnd == std::string::npos
+            ? std::string::npos
+            : requestLine.find(' ', methodEnd + 1);
+    if (methodEnd == std::string::npos || pathEnd == std::string::npos)
+      return;
+
+    std::string method = requestLine.substr(0, methodEnd);
+    std::string path =
+        requestLine.substr(methodEnd + 1, pathEnd - methodEnd - 1);
+
+    if (path != "/spotify_info") {
+      sendJson(fd, "{}");
+      return;
+    }
+
+    if (method == "GET") {
+      sendJson(fd, blob->buildZeroconfInfo());
+      return;
+    }
+
+    if (method == "POST") {
+      size_t clPos = request.find("Content-Length:");
+      size_t contentLength = 0;
+      if (clPos != std::string::npos) {
+        contentLength = std::strtoul(request.c_str() + clPos + 15, nullptr, 10);
+      }
+
+      std::string body = request.substr(headerEnd + 4);
+      while (body.size() < contentLength) {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        body.append(buf, n);
+      }
+
+      auto queryMap = parseFormBody(body);
+      blob->loadZeroconfQuery(queryMap);
+      paired = true;
+
+      sendJson(fd,
+               "{\"status\":101,\"spotifyError\":0,\"statusString\":\"ERROR-"
+               "OK\"}");
+      return;
+    }
+
+    sendJson(fd, "{}");
+  }
+};
+
+// Once ZeroconfHttpServer::paired flips (the phone posted valid
+// credentials), do the actual (blocking, potentially slow) connect+auth on
+// its own thread rather than inside the HTTP request handler, so the HTTP
+// response back to the phone stays fast.
+class LoginCompletionTask : public bell::Task {
+ public:
+  LoginCompletionTask(std::shared_ptr<cspot::LoginBlob> blobIn,
+                      ZeroconfHttpServer* serverIn)
+      : bell::Task("spotify_login_wait", 1024 * 16, 0, 0),
+        blob(std::move(blobIn)),
+        server(serverIn) {
+    startTask();
+  }
+
+  void runTask() override {
+    while (!server->paired) {
+      BELL_SLEEP_MS(200);
+    }
+
+    try {
+      gContext = cspot::Context::createFromBlob(blob);
+
+      printf("SpotifyClient: paired! connecting to a Spotify access point...\n");
+      gContext->session->connectWithRandomAp();
+      gContext->config.authData = gContext->session->authenticate(blob);
+
+      if (gContext->config.authData.empty()) {
+        printf("SpotifyClient: authentication failed after pairing\n");
+        return;
+      }
+
+      printf("SpotifyClient: authenticated OK, starting session + player\n");
+      gHandler = std::make_shared<cspot::SpircHandler>(gContext);
+      gContext->session->startTask();
+      gSessionPump = std::make_unique<SessionPumpTask>(gContext->session);
+
+      auto sink = std::make_unique<SwitchAudioSink>();
+      sink->setParams(44100, 2, 16);
+      gPlayerPump = std::make_unique<PlayerPumpTask>(std::move(sink), gHandler);
+
+      std::scoped_lock lock(gNowPlayingMutex);
+      gNowPlaying.is_connected = 1;
+    } catch (const std::exception& e) {
+      printf("SpotifyClient: exception after pairing: %s\n", e.what());
+    } catch (...) {
+      printf("SpotifyClient: unknown exception after pairing\n");
+    }
+  }
+
+ private:
+  std::shared_ptr<cspot::LoginBlob> blob;
+  ZeroconfHttpServer* server;
+};
+
+std::unique_ptr<ZeroconfHttpServer> gZeroconfServer;
+std::unique_ptr<LoginCompletionTask> gLoginCompletionTask;
 
 }  // namespace
 
@@ -234,42 +446,22 @@ int spotify_client_start(void) {
   try {
     bell::setDefaultLogger();
 
-    std::string username, password;
-    if (!readCredentials(username, password)) {
-      return 1;
-    }
-
     auto loginBlob = std::make_shared<cspot::LoginBlob>("MangoSpot");
-    loginBlob->loadUserPass(username, password);
 
-    gContext = cspot::Context::createFromBlob(loginBlob);
+    gZeroconfServer =
+        std::make_unique<ZeroconfHttpServer>(loginBlob, kZeroconfPort);
 
-    printf("SpotifyClient: connecting to a Spotify access point...\n");
-    gContext->session->connectWithRandomAp();
-    gContext->config.authData = gContext->session->authenticate(loginBlob);
+    bell::MDNSService::registerService(
+        loginBlob->getDeviceName(), "_spotify-connect", "_tcp", "",
+        kZeroconfPort,
+        {{"VERSION", "1.0"}, {"CPath", "/spotify_info"}, {"Stack", "SP"}});
 
-    if (gContext->config.authData.empty()) {
-      printf("SpotifyClient: authentication failed (check credentials)\n");
-      return 2;
-    }
-
-    printf("SpotifyClient: authenticated OK, starting session + player\n");
-    gHandler = std::make_shared<cspot::SpircHandler>(gContext);
-    gContext->session->startTask();
-    gSessionPump = std::make_unique<SessionPumpTask>(gContext->session);
-
-    auto sink = std::make_unique<SwitchAudioSink>();
-    sink->setParams(44100, 2, 16);
-    gPlayerPump = std::make_unique<PlayerPumpTask>(std::move(sink), gHandler);
-
-    {
-      std::scoped_lock lock(gNowPlayingMutex);
-      gNowPlaying.is_connected = 1;
-    }
+    gLoginCompletionTask = std::make_unique<LoginCompletionTask>(
+        loginBlob, gZeroconfServer.get());
 
     printf(
-        "SpotifyClient: ready - open Spotify on your phone/PC and pick "
-        "'%s' from the Connect device list\n",
+        "SpotifyClient: waiting for pairing - open Spotify on your phone/PC "
+        "and pick '%s' from the Connect device list\n",
         loginBlob->getDeviceName().c_str());
 
     return 0;

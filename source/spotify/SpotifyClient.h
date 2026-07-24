@@ -12,14 +12,14 @@ typedef struct {
   int is_connected; // 1 once login + session are up
 } SpotifyNowPlaying;
 
-// Reads credentials from sdmc:/switch/mangospot/login.txt (line 1:
-// username, line 2: password), logs into Spotify, and spins up background
-// threads for the network session and audio playback. This is a blocking
-// call (it performs the network handshake before returning) meant to be
-// called once at startup.
-//
-// Returns 0 on success, non-zero on failure (missing/invalid credentials
-// file, auth failure, network error).
+// Starts Spotify Connect via Zeroconf ("tap to pair") discovery: advertises
+// this device over mDNS and runs a tiny local HTTP endpoint that the
+// official Spotify app posts credentials to once you pick this device from
+// its Connect device list. (Plain username/password login is deprecated and
+// blocked by Spotify's servers, so this is the only login method cspot
+// supports that still works.) Spins up background threads for pairing,
+// networking, and audio playback, and returns immediately (0 on success -
+// meaning "listening for pairing", not "already connected").
 int spotify_client_start(void);
 
 // Fills `out` with the most recently known playback state. Safe to call

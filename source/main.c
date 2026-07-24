@@ -11,6 +11,7 @@
 int main(int argc, char* argv[]) {
     socketInitializeDefault();
     nxlinkStdio();  // stream printf/stderr to `nxlink -s` while debugging
+    nifmInitialize(NifmServiceType_User);  // needed for Zeroconf mDNS to find our own IP
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_AUDIO);
     Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096);
@@ -74,6 +75,7 @@ done:
     SDL_DestroyWindow(window);
     Mix_CloseAudio();
     SDL_Quit();
+    nifmExit();
     socketExit();
     return 0;
 }
