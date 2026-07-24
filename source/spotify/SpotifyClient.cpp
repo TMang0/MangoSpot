@@ -52,7 +52,15 @@ class SessionPumpTask : public bell::Task {
 
   void runTask() override {
     while (running) {
-      session->handlePacket();
+      try {
+        session->handlePacket();
+      } catch (const std::exception& e) {
+        printf("SpotifyClient: session pump exception: %s\n", e.what());
+        BELL_SLEEP_MS(50);
+      } catch (...) {
+        printf("SpotifyClient: session pump unknown exception\n");
+        BELL_SLEEP_MS(50);
+      }
     }
   }
 
@@ -122,29 +130,37 @@ class PlayerPumpTask : public bell::Task {
 
   void runTask() override {
     while (running) {
-      if (isPaused) {
-        BELL_SLEEP_MS(10);
-        continue;
-      }
-
-      auto chunk = centralAudioBuffer->readChunk();
-      if (!chunk || chunk->pcmSize == 0) {
-        if (playlistEnd) {
-          handler->notifyAudioEnded();
-          playlistEnd = false;
+      try {
+        if (isPaused) {
+          BELL_SLEEP_MS(10);
+          continue;
         }
-        BELL_SLEEP_MS(10);
-        continue;
-      }
 
-      if (lastHash != chunk->trackHash) {
-        lastHash = chunk->trackHash;
-        handler->notifyAudioReachedPlayback();
-      }
+        auto chunk = centralAudioBuffer->readChunk();
+        if (!chunk || chunk->pcmSize == 0) {
+          if (playlistEnd) {
+            handler->notifyAudioEnded();
+            playlistEnd = false;
+          }
+          BELL_SLEEP_MS(10);
+          continue;
+        }
 
-      dsp->process(chunk->pcmData, chunk->pcmSize, 2, 44100,
-                   bell::BitWidth::BW_16);
-      audioSink->feedPCMFrames(chunk->pcmData, chunk->pcmSize);
+        if (lastHash != chunk->trackHash) {
+          lastHash = chunk->trackHash;
+          handler->notifyAudioReachedPlayback();
+        }
+
+        dsp->process(chunk->pcmData, chunk->pcmSize, 2, 44100,
+                     bell::BitWidth::BW_16);
+        audioSink->feedPCMFrames(chunk->pcmData, chunk->pcmSize);
+      } catch (const std::exception& e) {
+        printf("SpotifyClient: player pump exception: %s\n", e.what());
+        BELL_SLEEP_MS(50);
+      } catch (...) {
+        printf("SpotifyClient: player pump unknown exception\n");
+        BELL_SLEEP_MS(50);
+      }
     }
   }
 
@@ -190,47 +206,60 @@ bool readCredentials(std::string& username, std::string& password) {
 }  // namespace
 
 int spotify_client_start(void) {
-  bell::setDefaultLogger();
+  // Everything here can throw (LoginBlob/JSON/crypto/networking all use
+  // exceptions, which we need enabled for cspot). This function is called
+  // from plain C (main.c) through an `extern "C"` boundary, and letting a
+  // C++ exception escape across that boundary is undefined behavior - it's
+  // the most likely cause of a hard crash instead of a clean error message.
+  try {
+    bell::setDefaultLogger();
 
-  std::string username, password;
-  if (!readCredentials(username, password)) {
-    return 1;
+    std::string username, password;
+    if (!readCredentials(username, password)) {
+      return 1;
+    }
+
+    auto loginBlob = std::make_shared<cspot::LoginBlob>("MangoSpot");
+    loginBlob->loadUserPass(username, password);
+
+    gContext = cspot::Context::createFromBlob(loginBlob);
+
+    printf("SpotifyClient: connecting to a Spotify access point...\n");
+    gContext->session->connectWithRandomAp();
+    gContext->config.authData = gContext->session->authenticate(loginBlob);
+
+    if (gContext->config.authData.empty()) {
+      printf("SpotifyClient: authentication failed (check credentials)\n");
+      return 2;
+    }
+
+    printf("SpotifyClient: authenticated OK, starting session + player\n");
+    gHandler = std::make_shared<cspot::SpircHandler>(gContext);
+    gContext->session->startTask();
+    gSessionPump = std::make_unique<SessionPumpTask>(gContext->session);
+
+    auto sink = std::make_unique<SwitchAudioSink>();
+    sink->setParams(44100, 2, 16);
+    gPlayerPump = std::make_unique<PlayerPumpTask>(std::move(sink), gHandler);
+
+    {
+      std::scoped_lock lock(gNowPlayingMutex);
+      gNowPlaying.is_connected = 1;
+    }
+
+    printf(
+        "SpotifyClient: ready - open Spotify on your phone/PC and pick "
+        "'%s' from the Connect device list\n",
+        loginBlob->getDeviceName().c_str());
+
+    return 0;
+  } catch (const std::exception& e) {
+    printf("SpotifyClient: fatal exception during startup: %s\n", e.what());
+    return 3;
+  } catch (...) {
+    printf("SpotifyClient: unknown fatal exception during startup\n");
+    return 3;
   }
-
-  auto loginBlob = std::make_shared<cspot::LoginBlob>("MangoSpot");
-  loginBlob->loadUserPass(username, password);
-
-  gContext = cspot::Context::createFromBlob(loginBlob);
-
-  printf("SpotifyClient: connecting to a Spotify access point...\n");
-  gContext->session->connectWithRandomAp();
-  gContext->config.authData = gContext->session->authenticate(loginBlob);
-
-  if (gContext->config.authData.empty()) {
-    printf("SpotifyClient: authentication failed (check credentials)\n");
-    return 2;
-  }
-
-  printf("SpotifyClient: authenticated OK, starting session + player\n");
-  gHandler = std::make_shared<cspot::SpircHandler>(gContext);
-  gContext->session->startTask();
-  gSessionPump = std::make_unique<SessionPumpTask>(gContext->session);
-
-  auto sink = std::make_unique<SwitchAudioSink>();
-  sink->setParams(44100, 2, 16);
-  gPlayerPump = std::make_unique<PlayerPumpTask>(std::move(sink), gHandler);
-
-  {
-    std::scoped_lock lock(gNowPlayingMutex);
-    gNowPlaying.is_connected = 1;
-  }
-
-  printf(
-      "SpotifyClient: ready - open Spotify on your phone/PC and pick "
-      "'%s' from the Connect device list\n",
-      loginBlob->getDeviceName().c_str());
-
-  return 0;
 }
 
 void spotify_client_get_now_playing(SpotifyNowPlaying* out) {
