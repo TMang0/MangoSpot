@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <SDL2/SDL_mixer.h>
 
@@ -24,6 +26,7 @@
 #include "BellUtils.h"
 #include "CSpotContext.h"
 #include "CentralAudioBuffer.h"
+#include "HTTPClient.h"
 #include "LoginBlob.h"
 #include "MDNSService.h"
 #include "SpircHandler.h"
@@ -42,19 +45,89 @@ namespace {
 // login method cspot actually supports that still works.
 constexpr int kZeroconfPort = 7864;
 
+// cspot's own desktop CLI reference target (targets/cli/CliPlayer.cpp) passes
+// 128*1024 as the CentralAudioBuffer chunk count. That constructor parameter
+// is a *chunk count*, not a byte count - each chunk is a packed ~4.1KB struct
+// (4096 bytes of PCM plus a small header), so the reference value allocates a
+// ~516MiB ring buffer up front. That's fine for a desktop CLI but wasteful
+// here, competing with the same heap now shared with SDL2/EGL/textures/the
+// shared system font. A few dozen seconds of cushion is already far more
+// than enough to absorb real network/decode hiccups.
+constexpr size_t kAudioBufferChunks = 4096;  // ~16.9MB, ~95s of 44.1kHz/
+                                              // 16-bit stereo PCM
+
+// How much decoded audio must be buffered before (re)starting playback
+// (initial connect, or after a seek/flush/track-change). Without this gate,
+// playback starts the instant the very first ~23ms chunk is decoded, so any
+// brief network/decode hiccup right at track start is immediately audible
+// as a stutter. ~2s is a small, barely-noticeable delay that absorbs that.
+constexpr size_t kPrebufferChunks = 86;  // 86*4096 bytes / 176400 B/s ~= 2s
+
 std::mutex gNowPlayingMutex;
 SpotifyNowPlaying gNowPlaying = {};
 
+// Cover art: downloaded on its own thread (CoverArtFetchTask, below) and
+// handed off here for the render layer to pick up (spotify_client_take_
+// cover_art) and decode on the main/render thread - SDL textures must be
+// created on the thread that owns the renderer.
+std::mutex gCoverArtMutex;
+std::vector<uint8_t> gCoverArtPendingBytes;
+bool gCoverArtPending = false;
+// Only ever read/written from setNowPlayingTrack, which always runs on the
+// PlayerPumpTask thread (see notifyAudioReachedPlayback call site below) -
+// no separate lock needed.
+std::string gLastCoverArtUrl;
+
+// Downloads a track's cover art (JPEG, from Spotify's public image CDN,
+// e.g. https://i.scdn.co/image/<id>) on its own thread so the network/
+// decode pump threads never block on it. One-shot: self-deletes once done.
+class CoverArtFetchTask : public bell::Task {
+ public:
+  explicit CoverArtFetchTask(std::string urlIn)
+      : bell::Task("spotify_cover_art", 1024 * 16, 0, 0), url(std::move(urlIn)) {
+    startTask();
+  }
+
+  void runTask() override {
+    try {
+      auto response = bell::HTTPClient::get(url);
+      auto bytes = response->bytes();
+      if (!bytes.empty()) {
+        std::scoped_lock lock(gCoverArtMutex);
+        gCoverArtPendingBytes = std::move(bytes);
+        gCoverArtPending = true;
+      }
+    } catch (const std::exception& e) {
+      printf("SpotifyClient: cover art fetch exception: %s\n", e.what());
+    } catch (...) {
+      printf("SpotifyClient: cover art fetch unknown exception\n");
+    }
+    delete this;
+  }
+
+ private:
+  std::string url;
+};
+
 void setNowPlayingTrack(const cspot::TrackInfo& track) {
-  std::scoped_lock lock(gNowPlayingMutex);
-  snprintf(gNowPlaying.title, sizeof(gNowPlaying.title), "%s",
-           track.name.c_str());
-  snprintf(gNowPlaying.artist, sizeof(gNowPlaying.artist), "%s",
-           track.artist.c_str());
-  snprintf(gNowPlaying.album, sizeof(gNowPlaying.album), "%s",
-           track.album.c_str());
-  gNowPlaying.duration_ms = track.duration;
-  gNowPlaying.position_secs = 0.0f;
+  {
+    std::scoped_lock lock(gNowPlayingMutex);
+    snprintf(gNowPlaying.title, sizeof(gNowPlaying.title), "%s",
+             track.name.c_str());
+    snprintf(gNowPlaying.artist, sizeof(gNowPlaying.artist), "%s",
+             track.artist.c_str());
+    snprintf(gNowPlaying.album, sizeof(gNowPlaying.album), "%s",
+             track.album.c_str());
+    gNowPlaying.duration_ms = track.duration;
+    gNowPlaying.position_secs = 0.0f;
+  }
+
+  // Only (re)download when the image actually changed - TRACK_INFO can
+  // re-fire for the same track (e.g. after a seek).
+  if (!track.imageUrl.empty() && track.imageUrl != gLastCoverArtUrl) {
+    gLastCoverArtUrl = track.imageUrl;
+    new CoverArtFetchTask(track.imageUrl);
+  }
 }
 
 // Pumps the raw network connection: reads + decrypts packets off the wire.
@@ -98,7 +171,7 @@ class PlayerPumpTask : public bell::Task {
         handler(std::move(handlerIn)),
         audioSink(std::move(sink)) {
     centralAudioBuffer =
-        std::make_shared<bell::CentralAudioBuffer>(128 * 1024);
+        std::make_shared<bell::CentralAudioBuffer>(kAudioBufferChunks);
     dsp = std::make_shared<bell::BellDSP>(centralAudioBuffer);
 
     handler->getTrackPlayer()->setDataCallback(
@@ -127,16 +200,19 @@ class PlayerPumpTask : public bell::Task {
                 gNowPlaying.position_secs = positionMs / 1000.0f;
               }
               centralAudioBuffer->clearBuffer();
+              needsPrebuffer = true;
               break;
             }
             case cspot::SpircHandler::EventType::FLUSH:
             case cspot::SpircHandler::EventType::DISC:
               centralAudioBuffer->clearBuffer();
+              needsPrebuffer = true;
               break;
             case cspot::SpircHandler::EventType::PLAYBACK_START:
               isPaused = false;
               playlistEnd = false;
               centralAudioBuffer->clearBuffer();
+              needsPrebuffer = true;
               {
                 std::scoped_lock lock(gNowPlayingMutex);
                 gNowPlaying.is_playing = 1;
@@ -161,6 +237,21 @@ class PlayerPumpTask : public bell::Task {
         if (isPaused) {
           BELL_SLEEP_MS(10);
           continue;
+        }
+
+        // Wait for a small cushion of decoded audio before (re)starting
+        // playback, so track-start/seek/flush doesn't immediately run the
+        // buffer dry from a brief network/decode hiccup. playlistEnd is the
+        // escape hatch: if there's genuinely no more data coming (e.g. a
+        // very short track), don't wait forever for a cushion that will
+        // never fill.
+        if (needsPrebuffer) {
+          if (!centralAudioBuffer->hasAtLeast(kPrebufferChunks) &&
+              !playlistEnd) {
+            BELL_SLEEP_MS(10);
+            continue;
+          }
+          needsPrebuffer = false;
         }
 
         auto chunk = centralAudioBuffer->readChunk();
@@ -200,6 +291,7 @@ class PlayerPumpTask : public bell::Task {
   std::shared_ptr<bell::BellDSP> dsp;
   std::atomic<bool> isPaused = true;
   std::atomic<bool> playlistEnd = false;
+  std::atomic<bool> needsPrebuffer = true;
   size_t lastHash = 0;
 };
 
@@ -421,12 +513,37 @@ class LoginCompletionTask : public bell::Task {
       BELL_SLEEP_MS(200);
     }
 
+    // Timing breakdown so real hardware logs can show exactly where the
+    // "pairing takes a while" time actually goes: mDNS discovery is already
+    // known to be fast (immediate announce + ~3s periodic backup), so the
+    // remaining delay is most likely these serial, network-bound steps -
+    // ApResolve, the AP TCP connect, and the Diffie-Hellman/Shannon
+    // handshake + login round-trip - each a real round trip to Spotify's
+    // servers that can't be skipped or parallelized.
+    auto pairedAt = std::chrono::steady_clock::now();
+
     try {
       gContext = cspot::Context::createFromBlob(blob);
+      auto contextCreatedAt = std::chrono::steady_clock::now();
 
       printf("SpotifyClient: paired! connecting to a Spotify access point...\n");
       gContext->session->connectWithRandomAp();
+      auto connectedAt = std::chrono::steady_clock::now();
+
       gContext->config.authData = gContext->session->authenticate(blob);
+      auto authenticatedAt = std::chrono::steady_clock::now();
+
+      auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a)
+            .count();
+      };
+      printf(
+          "SpotifyClient: timing - context=%lldms apResolve+connect=%lldms "
+          "handshake+auth=%lldms total=%lldms\n",
+          (long long)ms(pairedAt, contextCreatedAt),
+          (long long)ms(contextCreatedAt, connectedAt),
+          (long long)ms(connectedAt, authenticatedAt),
+          (long long)ms(pairedAt, authenticatedAt));
 
       if (gContext->config.authData.empty()) {
         printf("SpotifyClient: authentication failed after pairing\n");
@@ -514,6 +631,23 @@ int spotify_client_start(void) {
 void spotify_client_get_now_playing(SpotifyNowPlaying* out) {
   std::scoped_lock lock(gNowPlayingMutex);
   *out = gNowPlaying;
+}
+
+int spotify_client_take_cover_art(uint8_t** out_data, size_t* out_size) {
+  std::scoped_lock lock(gCoverArtMutex);
+  if (!gCoverArtPending) {
+    return 0;
+  }
+  gCoverArtPending = false;
+
+  uint8_t* buf = (uint8_t*)malloc(gCoverArtPendingBytes.size());
+  if (!buf) {
+    return 0;
+  }
+  memcpy(buf, gCoverArtPendingBytes.data(), gCoverArtPendingBytes.size());
+  *out_data = buf;
+  *out_size = gCoverArtPendingBytes.size();
+  return 1;
 }
 
 void spotify_client_advance_playback(float delta) {

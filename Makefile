@@ -61,7 +61,7 @@ LIBS := -lcspot -lbell -lopencore-aacdec -lopus -lmbedtls -lmbedx509 -lmbedcrypt
         -lmpg123 -lvorbisfile -lvorbis -lopusfile -lopus -lmodplug \
         -lSDL2_ttf -lSDL2_image -lSDL2 \
         -lharfbuzz -lfreetype \
-        -lpng -ljpeg -lbz2 -lz -logg \
+        -lpng -ljpeg -lwebp -lbz2 -lz -logg \
         -lEGL -lglapi -ldrm_nouveau \
         -lm -lnx
 

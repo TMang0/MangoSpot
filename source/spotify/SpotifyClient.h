@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -44,6 +45,15 @@ void spotify_client_advance_playback(float delta);
 void spotify_client_toggle_pause(void);
 void spotify_client_next(void);
 void spotify_client_prev(void);
+
+// If a new cover art image has finished downloading since the last call,
+// fills *out_data with a malloc'd buffer of encoded image bytes (JPEG, as
+// served by Spotify's image CDN) and *out_size with its length, and returns
+// 1 - the caller owns *out_data and MUST free() it. Returns 0 (leaving
+// *out_data/*out_size untouched) if no new image is available yet. Safe to
+// call every frame; does not block (the actual HTTP fetch happens on its
+// own background thread).
+int spotify_client_take_cover_art(uint8_t** out_data, size_t* out_size);
 
 #ifdef __cplusplus
 }

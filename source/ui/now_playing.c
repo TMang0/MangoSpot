@@ -75,15 +75,23 @@ void now_playing_draw(UIState* ui, RenderCtx* ctx) {
     SDL_Color surface = {24,  24,  24,  255};
     SDL_Color bar_bg  = {60,  60,  60,  255};
 
-    // Portada placeholder
+    // Portada: si ya se descargó y decodificó la portada real (solo aplica
+    // a la sesión real de Spotify Connect, el reproductor mock no tiene
+    // imágenes), se dibuja esa; si no, se cae al placeholder con la
+    // inicial del álbum.
     int cover_size = 260;
     int cover_x    = (SCREEN_W - cover_size) / 2;
     int cover_y    = 60;
-    render_rect_rounded(ctx, cover_x, cover_y, cover_size, cover_size, 12, surface);
-    char initial[2] = { album_initial, '\0' };
-    render_text_centered(ctx, initial,
-        cover_x, cover_y + cover_size/2 - 30,
-        cover_size, muted, ctx->font_bold);
+    SDL_Texture* cover = np.is_connected ? render_get_spotify_cover_art(ctx) : NULL;
+    if (cover) {
+        render_texture(ctx, cover, cover_x, cover_y, cover_size, cover_size);
+    } else {
+        render_rect_rounded(ctx, cover_x, cover_y, cover_size, cover_size, 12, surface);
+        char initial[2] = { album_initial, '\0' };
+        render_text_centered(ctx, initial,
+            cover_x, cover_y + cover_size/2 - 30,
+            cover_size, muted, ctx->font_bold);
+    }
 
     // Título y artista
     int info_y = cover_y + cover_size + 28;

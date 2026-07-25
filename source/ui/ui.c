@@ -138,10 +138,16 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
     render_rect(ctx, 0, y, SCREEN_W, h, bg);
     render_rect(ctx, 0, y, SCREEN_W, 2, border);  // borde superior
 
-    // Portada placeholder
-    render_rect_rounded(ctx, margin, y + 12, 56, 56, 6, (SDL_Color){40,40,40,255});
-    char initial[2] = { album_initial, '\0' };
-    render_text_centered(ctx, initial, margin, y + 28, 56, muted, ctx->font_small);
+    // Portada: igual que en la pantalla grande, usa la real si ya está
+    // disponible, si no cae al placeholder con la inicial del álbum.
+    SDL_Texture* cover = np.is_connected ? render_get_spotify_cover_art(ctx) : NULL;
+    if (cover) {
+        render_texture(ctx, cover, margin, y + 12, 56, 56);
+    } else {
+        render_rect_rounded(ctx, margin, y + 12, 56, 56, 6, (SDL_Color){40,40,40,255});
+        char initial[2] = { album_initial, '\0' };
+        render_text_centered(ctx, initial, margin, y + 28, 56, muted, ctx->font_small);
+    }
 
     // Título y artista
     render_text(ctx, title,  margin + 68, y + 14, white, ctx->font_regular);

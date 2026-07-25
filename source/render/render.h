@@ -36,5 +36,16 @@ void render_bar(RenderCtx* ctx, int x, int y, int w, int h, float pct, SDL_Color
 void render_text(RenderCtx* ctx, const char* text, int x, int y, SDL_Color color, TTF_Font* font);
 void render_text_centered(RenderCtx* ctx, const char* text, int x, int y, int w, SDL_Color color, TTF_Font* font);
 
+// Texturas
+void render_texture(RenderCtx* ctx, SDL_Texture* tex, int x, int y, int w, int h);
+
+// Devuelve la textura de la portada del álbum actualmente reproduciéndose en
+// Spotify (decodificada y cacheada internamente a partir de lo último que
+// haya bajado SpotifyClient), o NULL si todavía no hay ninguna disponible o
+// no se pudo decodificar - el llamador debe usar esto como algo opcional y
+// tener un fallback (ej. la portada placeholder) para el caso NULL. Segura
+// de llamar todos los frames.
+SDL_Texture* render_get_spotify_cover_art(RenderCtx* ctx);
+
 // Utilidad
 void render_format_time(int secs, char* buf, int buf_size); // 183 → "3:03"

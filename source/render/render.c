@@ -1,7 +1,10 @@
 #include "render.h"
 #include <switch.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <SDL2/SDL_image.h>
+#include "../spotify/SpotifyClient.h"
 
 int render_init(RenderCtx* ctx, SDL_Window* window) {
     FILE* log = fopen("sdmc:/switch/mangospot/debug.log", "a");
@@ -20,6 +23,15 @@ int render_init(RenderCtx* ctx, SDL_Window* window) {
         return -1;
     }
     fprintf(log, "TTF OK\n"); fflush(log);
+
+    // Para decodificar la portada de los álbumes (JPEG, viene de la CDN de
+    // imágenes de Spotify). No es fatal si falla - simplemente no habrá
+    // portadas y se sigue mostrando el placeholder con la inicial.
+    int imgFlags = IMG_INIT_JPG | IMG_INIT_PNG;
+    if ((IMG_Init(imgFlags) & imgFlags) != imgFlags) {
+        fprintf(log, "IMG_Init incompleto: %s\n", IMG_GetError());
+    }
+    fflush(log);
 
     // Use the Switch's built-in shared system font (pl service) instead of a
     // bundled .ttf: always present, no licensing/redistribution concerns, and
@@ -64,6 +76,7 @@ void render_destroy(RenderCtx* ctx) {
     TTF_CloseFont(ctx->font_bold);
     TTF_CloseFont(ctx->font_small);
     TTF_Quit();
+    IMG_Quit();
     SDL_DestroyRenderer(ctx->renderer);
 }
 
@@ -148,4 +161,39 @@ void render_format_time(int secs, char* buf, int buf_size) {
     int m = secs / 60;
     int s = secs % 60;
     snprintf(buf, buf_size, "%d:%02d", m, s);
+}
+
+void render_texture(RenderCtx* ctx, SDL_Texture* tex, int x, int y, int w, int h) {
+    if (!tex) return;
+    SDL_Rect dst = { x, y, w, h };
+    SDL_RenderCopy(ctx->renderer, tex, NULL, &dst);
+}
+
+// Textura cacheada de la última portada decodificada - se reemplaza (y la
+// anterior se destruye) solo cuando SpotifyClient tiene bytes nuevos.
+static SDL_Texture* g_spotify_cover_texture = NULL;
+
+SDL_Texture* render_get_spotify_cover_art(RenderCtx* ctx) {
+    uint8_t* data = NULL;
+    size_t size = 0;
+    if (spotify_client_take_cover_art(&data, &size)) {
+        SDL_Texture* new_tex = NULL;
+        if (data && size > 0) {
+            SDL_RWops* rw = SDL_RWFromConstMem(data, (int)size);
+            SDL_Surface* surface = IMG_Load_RW(rw, 1); // 1 = auto-cierra rw
+            if (surface) {
+                new_tex = SDL_CreateTextureFromSurface(ctx->renderer, surface);
+                SDL_FreeSurface(surface);
+            } else {
+                printf("render: fallo decodificando portada: %s\n", IMG_GetError());
+            }
+        }
+        free(data);
+
+        if (g_spotify_cover_texture) {
+            SDL_DestroyTexture(g_spotify_cover_texture);
+        }
+        g_spotify_cover_texture = new_tex;
+    }
+    return g_spotify_cover_texture;
 }
