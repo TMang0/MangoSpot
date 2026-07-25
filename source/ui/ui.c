@@ -2,6 +2,7 @@
 #include "library.h"
 #include "album.h"
 #include "now_playing.h"
+#include "../spotify/SpotifyClient.h"
 
 void ui_init(UIState* ui, Player* player) {
     ui->active              = SCREEN_LIBRARY;
@@ -41,13 +42,22 @@ void ui_update(UIState* ui, u64 held, u64 down) {
             ui->mini_player_focused = 0;
             return;
         }
-        // Controles del mini player
-        if (down & HidNpadButton_A)
-            player_toggle_pause(ui->player);
-        if ((down & HidNpadButton_R) || (down & HidNpadButton_ZR))
-            player_next(ui->player);
-        if ((down & HidNpadButton_L) || (down & HidNpadButton_ZL))
-            player_prev(ui->player);
+        SpotifyNowPlaying np;
+        spotify_client_get_now_playing(&np);
+        // Controles del mini player - si estamos conectados a Spotify de
+        // verdad, mandan comandos reales en lugar de tocar el mock.
+        if (down & HidNpadButton_A) {
+            if (np.is_connected) spotify_client_toggle_pause();
+            else player_toggle_pause(ui->player);
+        }
+        if ((down & HidNpadButton_R) || (down & HidNpadButton_ZR)) {
+            if (np.is_connected) spotify_client_next();
+            else player_next(ui->player);
+        }
+        if ((down & HidNpadButton_L) || (down & HidNpadButton_ZL)) {
+            if (np.is_connected) spotify_client_prev();
+            else player_prev(ui->player);
+        }
         // Y → abrir now playing
         if (down & HidNpadButton_Y)
             ui->active = SCREEN_NOW_PLAYING;
@@ -85,8 +95,31 @@ void ui_draw(UIState* ui, RenderCtx* ctx) {
 }
 
 void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
-    Player* p = ui->player;
-    if (!p->current_song) return;
+    SpotifyNowPlaying np;
+    spotify_client_get_now_playing(&np);
+
+    const char* title;
+    const char* artist;
+    char album_initial;
+    int is_playing;
+    float progress_pct;
+
+    if (np.is_connected) {
+        title  = np.title;
+        artist = np.artist;
+        album_initial = np.album[0] ? np.album[0] : '?';
+        is_playing = np.is_playing;
+        int total_secs = (int)(np.duration_ms / 1000);
+        progress_pct = total_secs > 0 ? (np.position_secs / (float)total_secs) : 0.0f;
+    } else {
+        Player* p = ui->player;
+        if (!p->current_song) return;
+        title  = p->current_song->title;
+        artist = p->current_song->artist;
+        album_initial = p->current_song->album[0];
+        is_playing = (p->state == PLAYER_PLAYING);
+        progress_pct = player_progress_pct(p);
+    }
 
     SDL_Color bg      = {18,  18,  18,  255};
     SDL_Color white   = {255, 255, 255, 255};
@@ -107,18 +140,18 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
 
     // Portada placeholder
     render_rect_rounded(ctx, margin, y + 12, 56, 56, 6, (SDL_Color){40,40,40,255});
-    char initial[2] = { p->current_song->album[0], '\0' };
+    char initial[2] = { album_initial, '\0' };
     render_text_centered(ctx, initial, margin, y + 28, 56, muted, ctx->font_small);
 
     // Título y artista
-    render_text(ctx, p->current_song->title,  margin + 68, y + 14, white, ctx->font_regular);
-    render_text(ctx, p->current_song->artist, margin + 68, y + 40, muted, ctx->font_small);
+    render_text(ctx, title,  margin + 68, y + 14, white, ctx->font_regular);
+    render_text(ctx, artist, margin + 68, y + 40, muted, ctx->font_small);
 
     // Controles
     int ctrl_x = SCREEN_W - 220;
     render_text(ctx, "[L]", ctrl_x,       y + 28, muted,  ctx->font_small);
     render_text(ctx,
-        (p->state == PLAYER_PLAYING) ? "||" : ">",
+        is_playing ? "||" : ">",
         ctrl_x + 60,  y + 24, green,  ctx->font_bold);
     render_text(ctx, "[R]", ctrl_x + 120, y + 28, muted,  ctx->font_small);
 
@@ -128,5 +161,5 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
             0, y - 24, SCREEN_W, muted, ctx->font_small);
 
     // Barra de progreso
-    render_bar(ctx, 0, y - 3, SCREEN_W, 3, player_progress_pct(p), bar_bg, green);
+    render_bar(ctx, 0, y - 3, SCREEN_W, 3, progress_pct, bar_bg, green);
 }

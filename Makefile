@@ -87,6 +87,14 @@ export LIBPATHS := $(CSPOT_LIBPATHS) $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 export APP_ICON := $(TOPDIR)/icon.jpg
 
+# elf2nro flags. WITHOUT --romfsdir the bundled romfs (fonts + mock songs) is
+# NOT embedded in the .nro, so romfs:/ is empty at runtime. --nacp/--icon embed
+# the title/author/version metadata and the home-menu icon.
+export NROFLAGS := --icon=$(APP_ICON) --nacp=$(OUTPUT).nacp
+ifneq ($(strip $(ROMFS)),)
+export NROFLAGS += --romfsdir=$(ROMFS)
+endif
+
 .PHONY: $(BUILD) clean all
 
 all: $(BUILD)

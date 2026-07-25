@@ -9,9 +9,9 @@ Album library[] = {
         .track_count = 5,
         .tracks = {
             { "Give Life Back to Music", "Daft Punk", "Random Access Memories", 274,
-              "sdmc:/switch/mangospot/songs/give_life_back_to_music.mp3" },
+              "romfs:/songs/give_life_back_to_music.mp3" },
             { "The Game of Love",        "Daft Punk", "Random Access Memories", 279,
-              "sdmc:/switch/mangospot/songs/the_game_of_love.mp3" },
+              "romfs:/songs/the_game_of_love.mp3" },
             { "Giorgio by Moroder",      "Daft Punk", "Random Access Memories", 544, NULL },
             { "Within",                  "Daft Punk", "Random Access Memories", 230, NULL },
             { "Instant Crush",           "Daft Punk", "Random Access Memories", 337, NULL },

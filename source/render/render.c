@@ -1,4 +1,5 @@
 #include "render.h"
+#include <switch.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -20,18 +21,31 @@ int render_init(RenderCtx* ctx, SDL_Window* window) {
     }
     fprintf(log, "TTF OK\n"); fflush(log);
 
-    const char* path_regular = "sdmc:/switch/mangospot/fonts/font.ttf";
-    const char* path_bold    = "sdmc:/switch/mangospot/fonts/font-bold.ttf";
+    // Use the Switch's built-in shared system font (pl service) instead of a
+    // bundled .ttf: always present, no licensing/redistribution concerns, and
+    // covers JP/US/Europe. The font memory is mapped for the whole process
+    // lifetime (we plInitialize in main), so the RWops stay valid.
+    PlFontData stdfont;
+    Result plrc = plGetSharedFontByType(&stdfont, PlSharedFontType_Standard);
+    if (R_FAILED(plrc)) {
+        fprintf(log, "plGetSharedFontByType failed: 0x%x\n", plrc);
+        fclose(log);
+        return -1;
+    }
+    fprintf(log, "shared font: %u bytes\n", stdfont.size); fflush(log);
 
-    fprintf(log, "intentando abrir: %s\n", path_regular); fflush(log);
-    ctx->font_regular = TTF_OpenFont(path_regular, 24);
+    ctx->font_regular = TTF_OpenFontRW(
+        SDL_RWFromConstMem(stdfont.address, stdfont.size), 1, 24);
     fprintf(log, "font_regular: %s\n", ctx->font_regular ? "OK" : TTF_GetError()); fflush(log);
 
-    fprintf(log, "intentando abrir: %s\n", path_bold); fflush(log);
-    ctx->font_bold = TTF_OpenFont(path_bold, 24);
+    // No separate bold face in the shared font; synthesize bold via style.
+    ctx->font_bold = TTF_OpenFontRW(
+        SDL_RWFromConstMem(stdfont.address, stdfont.size), 1, 24);
+    if (ctx->font_bold) TTF_SetFontStyle(ctx->font_bold, TTF_STYLE_BOLD);
     fprintf(log, "font_bold: %s\n", ctx->font_bold ? "OK" : TTF_GetError()); fflush(log);
 
-    ctx->font_small = TTF_OpenFont(path_regular, 18);
+    ctx->font_small = TTF_OpenFontRW(
+        SDL_RWFromConstMem(stdfont.address, stdfont.size), 1, 18);
     fprintf(log, "font_small: %s\n", ctx->font_small ? "OK" : TTF_GetError()); fflush(log);
 
     if (!ctx->font_regular || !ctx->font_bold || !ctx->font_small) {

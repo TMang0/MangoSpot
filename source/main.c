@@ -3,27 +3,44 @@
 #include <switch.h>
 #include <stdio.h>
 #include <string.h>
+#include "applog.h"
 #include "render/render.h"
 #include "player/player.h"
 #include "ui/ui.h"
 #include "spotify/SpotifyClient.h"
 
 int main(int argc, char* argv[]) {
+    applog_init();  // stdout/stderr -> sdmc:/mangospot.log (survives crashes)
+    printf("main: applog ready\n");
+
+    romfsInit();  // mount romfs:/ (bundled fonts + mock songs live here)
+    printf("main: romfs mounted\n");
+
+    plInitialize(PlServiceType_User);  // Switch shared system fonts (render.c)
+    printf("main: pl (shared fonts) initialized\n");
+
     socketInitializeDefault();
-    nxlinkStdio();  // stream printf/stderr to `nxlink -s` while debugging
+    printf("main: socket initialized\n");
     nifmInitialize(NifmServiceType_User);  // needed for Zeroconf mDNS to find our own IP
+    printf("main: nifm initialized\n");
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_AUDIO);
     Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096);
+    printf("main: SDL + mixer initialized\n");
+    applog_flush();
 
     if (spotify_client_start() != 0) {
         printf("main: Spotify Connect not started (see message above)\n");
     }
+    printf("main: spotify_client_start returned\n");
+    applog_flush();
 
     SDL_Window* window = SDL_CreateWindow(
         "Spotify Switch", 0, 0, 0, 0,
         SDL_WINDOW_FULLSCREEN
     );
+    printf("main: window created\n");
+    applog_flush();
 
     RenderCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -33,6 +50,8 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return 1;
     }
+    printf("main: render initialized, entering main loop\n");
+    applog_flush();
 
     Player player;
     player_init(&player);
@@ -64,6 +83,7 @@ int main(int argc, char* argv[]) {
 
         ui_update(&ui, held, down);
         player_update(&player, delta);
+        spotify_client_advance_playback(delta);
 
         render_clear(&ctx);
         ui_draw(&ui, &ctx);
@@ -77,5 +97,7 @@ done:
     SDL_Quit();
     nifmExit();
     socketExit();
+    plExit();
+    romfsExit();
     return 0;
 }

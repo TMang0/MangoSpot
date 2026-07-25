@@ -16,6 +16,8 @@
 #include <string>
 #include <string_view>
 
+#include <SDL2/SDL_mixer.h>
+
 #include "BellDSP.h"
 #include "BellLogger.h"
 #include "BellTask.h"
@@ -51,6 +53,8 @@ void setNowPlayingTrack(const cspot::TrackInfo& track) {
            track.artist.c_str());
   snprintf(gNowPlaying.album, sizeof(gNowPlaying.album), "%s",
            track.album.c_str());
+  gNowPlaying.duration_ms = track.duration;
+  gNowPlaying.position_secs = 0.0f;
 }
 
 // Pumps the raw network connection: reads + decrypts packets off the wire.
@@ -116,9 +120,17 @@ class PlayerPumpTask : public bell::Task {
             case cspot::SpircHandler::EventType::TRACK_INFO:
               setNowPlayingTrack(std::get<cspot::TrackInfo>(event->data));
               break;
+            case cspot::SpircHandler::EventType::SEEK: {
+              int positionMs = std::get<int>(event->data);
+              {
+                std::scoped_lock lock(gNowPlayingMutex);
+                gNowPlaying.position_secs = positionMs / 1000.0f;
+              }
+              centralAudioBuffer->clearBuffer();
+              break;
+            }
             case cspot::SpircHandler::EventType::FLUSH:
             case cspot::SpircHandler::EventType::DISC:
-            case cspot::SpircHandler::EventType::SEEK:
               centralAudioBuffer->clearBuffer();
               break;
             case cspot::SpircHandler::EventType::PLAYBACK_START:
@@ -129,6 +141,7 @@ class PlayerPumpTask : public bell::Task {
                 std::scoped_lock lock(gNowPlayingMutex);
                 gNowPlaying.is_playing = 1;
                 gNowPlaying.is_connected = 1;
+                gNowPlaying.position_secs = 0.0f;
               }
               break;
             case cspot::SpircHandler::EventType::DEPLETED:
@@ -337,8 +350,19 @@ class ZeroconfHttpServer : public bell::Task {
       return;
 
     std::string method = requestLine.substr(0, methodEnd);
-    std::string path =
+    std::string fullPath =
         requestLine.substr(methodEnd + 1, pathEnd - methodEnd - 1);
+    // Real HTTP clients are allowed (RFC 7230 origin-form) to append a query
+    // string to the request target, e.g. "/spotify_info?action=getInfo".
+    // cspot's reference Linux/ESP32 targets never hit this because their
+    // BellHTTPServer is backed by civetweb/mongoose, which separates the
+    // path from the query string before route matching. Our hand-rolled
+    // router compared the raw request-target verbatim, so any query string
+    // made the exact match fail and silently fell through to the empty "{}"
+    // stub - indistinguishable from "the client never asked" in our own
+    // logs, and never caught by manual curl tests that happened to omit a
+    // query string.
+    std::string path = fullPath.substr(0, fullPath.find('?'));
 
     if (path != "/spotify_info") {
       sendJson(fd, "{}");
@@ -414,6 +438,15 @@ class LoginCompletionTask : public bell::Task {
       gContext->session->startTask();
       gSessionPump = std::make_unique<SessionPumpTask>(gContext->session);
 
+      // The Switch only has one physical audio output stream. SDL_mixer's
+      // Mix_OpenAudio (opened at startup in main.c, used by the local
+      // mock-library demo player) already holds it, so SwitchAudioSink's
+      // own SDL_OpenAudioDevice() would otherwise fail with "Audio device
+      // already open" right here - real Spotify playback wins once we're
+      // actually paired and authenticated.
+      Mix_HaltMusic();
+      Mix_CloseAudio();
+
       auto sink = std::make_unique<SwitchAudioSink>();
       sink->setParams(44100, 2, 16);
       gPlayerPump = std::make_unique<PlayerPumpTask>(std::move(sink), gHandler);
@@ -434,6 +467,10 @@ class LoginCompletionTask : public bell::Task {
 
 std::unique_ptr<ZeroconfHttpServer> gZeroconfServer;
 std::unique_ptr<LoginCompletionTask> gLoginCompletionTask;
+// Must outlive the function: registerService() returns a handle that owns
+// the mDNS responder thread. If discarded, the thread is destroyed
+// immediately on startup and the app hard-crashes with no logs.
+std::unique_ptr<bell::MDNSService> gMdnsService;
 
 }  // namespace
 
@@ -451,7 +488,7 @@ int spotify_client_start(void) {
     gZeroconfServer =
         std::make_unique<ZeroconfHttpServer>(loginBlob, kZeroconfPort);
 
-    bell::MDNSService::registerService(
+    gMdnsService = bell::MDNSService::registerService(
         loginBlob->getDeviceName(), "_spotify-connect", "_tcp", "",
         kZeroconfPort,
         {{"VERSION", "1.0"}, {"CPath", "/spotify_info"}, {"Stack", "SP"}});
@@ -477,4 +514,36 @@ int spotify_client_start(void) {
 void spotify_client_get_now_playing(SpotifyNowPlaying* out) {
   std::scoped_lock lock(gNowPlayingMutex);
   *out = gNowPlaying;
+}
+
+void spotify_client_advance_playback(float delta) {
+  std::scoped_lock lock(gNowPlayingMutex);
+  if (!gNowPlaying.is_connected || !gNowPlaying.is_playing) return;
+  gNowPlaying.position_secs += delta;
+  float durationSecs = gNowPlaying.duration_ms / 1000.0f;
+  if (durationSecs > 0 && gNowPlaying.position_secs > durationSecs) {
+    gNowPlaying.position_secs = durationSecs;
+  }
+}
+
+void spotify_client_toggle_pause(void) {
+  if (!gHandler) return;
+  bool currentlyPlaying;
+  {
+    std::scoped_lock lock(gNowPlayingMutex);
+    if (!gNowPlaying.is_connected) return;
+    currentlyPlaying = gNowPlaying.is_playing != 0;
+  }
+  // setPause(true) pauses, setPause(false) resumes - so pass whether we're
+  // currently playing to flip it. This synchronously fires the PLAY_PAUSE
+  // event back through our handler, which updates gNowPlaying.is_playing.
+  gHandler->setPause(currentlyPlaying);
+}
+
+void spotify_client_next(void) {
+  if (gHandler) gHandler->nextSong();
+}
+
+void spotify_client_prev(void) {
+  if (gHandler) gHandler->previousSong();
 }
