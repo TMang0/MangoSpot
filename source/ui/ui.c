@@ -13,27 +13,18 @@ void ui_init(UIState* ui, Player* player) {
 }
 
 void ui_update(UIState* ui, u64 held, u64 down) {
-    // Solo library y album tienen mini player interactivo
+    (void)held;
+
+    // Solo la pantalla grande del reproductor tiene su propia navegación.
     if (ui->active == SCREEN_NOW_PLAYING) {
         now_playing_update(ui, down);
         return;
     }
 
-    // Bajar al mini player
+    // Bajar al mini player con Abajo desde la pantalla de bienvenida.
     if (!ui->mini_player_focused && (down & HidNpadButton_Down)) {
-        // Si ya estamos en el último item, bajar al mini player
-        int at_bottom = 0;
-        if (ui->active == SCREEN_LIBRARY && ui->library_selected == library_count - 1)
-            at_bottom = 1;
-        if (ui->active == SCREEN_ALBUM) {
-            Album* a = &library[ui->library_selected];
-            if (ui->album_selected == a->track_count - 1)
-                at_bottom = 1;
-        }
-        if (at_bottom) {
-            ui->mini_player_focused = 1;
-            return;
-        }
+        ui->mini_player_focused = 1;
+        return;
     }
 
     // Subir desde mini player
@@ -64,7 +55,8 @@ void ui_update(UIState* ui, u64 held, u64 down) {
         return;
     }
 
-    // Navegación normal
+    // La pantalla de bienvenida no tiene navegación propia; el álbum
+    // tampoco tiene contenido, solo [B] para volver.
     switch (ui->active) {
         case SCREEN_LIBRARY:
             library_update(ui, down);
@@ -113,12 +105,19 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
         progress_pct = total_secs > 0 ? (np.position_secs / (float)total_secs) : 0.0f;
     } else {
         Player* p = ui->player;
-        if (!p->current_song) return;
-        title  = p->current_song->title;
-        artist = p->current_song->artist;
-        album_initial = p->current_song->album[0];
-        is_playing = (p->state == PLAYER_PLAYING);
-        progress_pct = player_progress_pct(p);
+        if (p->current_song) {
+            title  = p->current_song->title;
+            artist = p->current_song->artist;
+            album_initial = p->current_song->album[0];
+            is_playing = (p->state == PLAYER_PLAYING);
+            progress_pct = player_progress_pct(p);
+        } else {
+            title  = "No conectado";
+            artist = "Abre Spotify y elige MangoSpot";
+            album_initial = '?';
+            is_playing = 0;
+            progress_pct = 0.0f;
+        }
     }
 
     SDL_Color bg      = {18,  18,  18,  255};

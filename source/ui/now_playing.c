@@ -59,7 +59,20 @@ void now_playing_draw(UIState* ui, RenderCtx* ctx) {
     } else {
         Player* p = ui->player;
         Song*   s = p->current_song;
-        if (!s) return;
+        if (!s) {
+            // Sin canción local y sin conexión a Spotify: pantalla de
+            // bienvenida en lugar de quedarse en negro.
+            SDL_Color muted = {179, 179, 179, 255};
+            SDL_Color green = {30,  215, 96,  255};
+            render_text_centered(ctx, "MangoSpot", 0, 260, SCREEN_W, green, ctx->font_bold);
+            render_text_centered(ctx, "No hay reproducción activa",
+                0, 340, SCREEN_W, muted, ctx->font_regular);
+            render_text_centered(ctx, "Conéctate desde Spotify y selecciona este dispositivo",
+                0, 380, SCREEN_W, muted, ctx->font_small);
+            render_text_centered(ctx, "[B] Volver",
+                0, 520, SCREEN_W, muted, ctx->font_small);
+            return;
+        }
         title  = s->title;
         artist = s->artist;
         album_initial = s->album[0];

@@ -13,7 +13,7 @@ int main(int argc, char* argv[]) {
     applog_init();  // stdout/stderr -> sdmc:/mangospot.log (survives crashes)
     printf("main: applog ready\n");
 
-    romfsInit();  // mount romfs:/ (bundled fonts + mock songs live here)
+    romfsInit();  // mount romfs:/ (shared system fonts live here; mock songs removed)
     printf("main: romfs mounted\n");
 
     plInitialize(PlServiceType_User);  // Switch shared system fonts (render.c)
