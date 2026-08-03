@@ -64,6 +64,14 @@ constexpr size_t kAudioBufferChunks = 4096;  // ~16.9MB, ~95s of 44.1kHz/
 // while making track changes feel much snappier than the previous ~2s gate.
 constexpr size_t kPrebufferChunks = 40;  // 40*4096 bytes / 176400 B/s ~= 0.93s
 
+// Anti-starvation rebuffer thresholds. If the central buffer drops below the
+// low threshold during playback, we stop draining it and wait until it refills
+// to the high threshold. This avoids playing choppy/stuttering audio when the
+// decoder or network cannot keep up. The SDL audio queue will finish whatever
+// it already has, then we resume cleanly once the buffer recovers.
+constexpr size_t kRebufferLowChunks = 20;   // ~0.46s
+constexpr size_t kRebufferHighChunks = 80;  // ~1.86s
+
 // Helper: monotonic milliseconds for timing logs.
 inline uint64_t monotonic_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -233,6 +241,7 @@ class PlayerPumpTask : public bell::Task {
             case cspot::SpircHandler::EventType::PLAYBACK_START:
               isPaused = false;
               playlistEnd = false;
+              isRebuffering = false;
               centralAudioBuffer->clearBuffer();
               needsPrebuffer = true;
               {
@@ -289,6 +298,34 @@ class PlayerPumpTask : public bell::Task {
             continue;
           }
           needsPrebuffer = false;
+          isRebuffering = false;
+        }
+
+        // Dynamic anti-starvation rebuffer: if the decoder/network cannot
+        // keep the central buffer above a safe minimum, stop draining it and
+        // let the SDL queue drain to silence rather than playing stuttering
+        // audio. Resume once the buffer has recovered to a comfortable level.
+        size_t currentChunks =
+            centralAudioBuffer->audioBuffer->size() /
+            sizeof(bell::CentralAudioBuffer::AudioChunk);
+        if (isRebuffering) {
+          if (!centralAudioBuffer->hasAtLeast(kRebufferHighChunks) &&
+              !playlistEnd) {
+            BELL_SLEEP_MS(10);
+            continue;
+          }
+          isRebuffering = false;
+          printf(
+              "SpotifyClient: rebuffer done, central=%zu chunks, resuming\n",
+              currentChunks);
+        } else if (currentChunks < kRebufferLowChunks) {
+          isRebuffering = true;
+          printf(
+              "SpotifyClient: rebuffering, central buffer too low "
+              "(%zu<%zu chunks)\n",
+              currentChunks, kRebufferLowChunks);
+          BELL_SLEEP_MS(10);
+          continue;
         }
 
         auto chunk = centralAudioBuffer->readChunk();
@@ -352,6 +389,7 @@ class PlayerPumpTask : public bell::Task {
   std::atomic<bool> isPaused = true;
   std::atomic<bool> playlistEnd = false;
   std::atomic<bool> needsPrebuffer = true;
+  std::atomic<bool> isRebuffering = false;
   size_t lastHash = 0;
 };
 
