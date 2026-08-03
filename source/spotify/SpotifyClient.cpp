@@ -60,9 +60,9 @@ constexpr size_t kAudioBufferChunks = 4096;  // ~16.9MB, ~95s of 44.1kHz/
 // (initial connect, or after a seek/flush/track-change). Without this gate,
 // playback starts the instant the very first ~23ms chunk is decoded, so any
 // brief network/decode hiccup right at track start is immediately audible
-// as a stutter. ~0.9s is a small delay that still absorbs micro-hiccups
-// while making track changes feel much snappier than the previous ~2s gate.
-constexpr size_t kPrebufferChunks = 40;  // 40*4096 bytes / 176400 B/s ~= 0.93s
+// as a stutter. ~1.86s gives a solid cushion against WiFi latency spikes
+// while still feeling responsive.
+constexpr size_t kPrebufferChunks = 80;  // 80*4096 bytes / 176400 B/s ~= 1.86s
 
 // Anti-starvation rebuffer thresholds. If the central buffer drops below the
 // low threshold during playback, we stop draining it and wait until it refills
