@@ -17,7 +17,7 @@ static void flusher_thread(void* arg) {
     while (g_run) {
         fflush(stdout);
         fsdevCommitDevice("sdmc");
-        svcSleepThread(100000000ULL);  // 100 ms
+        svcSleepThread(1000000000ULL);  // 1 s (was 100 ms)
     }
 }
 

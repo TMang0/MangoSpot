@@ -60,8 +60,20 @@ constexpr size_t kAudioBufferChunks = 4096;  // ~16.9MB, ~95s of 44.1kHz/
 // (initial connect, or after a seek/flush/track-change). Without this gate,
 // playback starts the instant the very first ~23ms chunk is decoded, so any
 // brief network/decode hiccup right at track start is immediately audible
-// as a stutter. ~2s is a small, barely-noticeable delay that absorbs that.
-constexpr size_t kPrebufferChunks = 86;  // 86*4096 bytes / 176400 B/s ~= 2s
+// as a stutter. ~0.9s is a small delay that still absorbs micro-hiccups
+// while making track changes feel much snappier than the previous ~2s gate.
+constexpr size_t kPrebufferChunks = 40;  // 40*4096 bytes / 176400 B/s ~= 0.93s
+
+// Helper: monotonic milliseconds for timing logs.
+inline uint64_t monotonic_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// Timestamp of the most recent NEXT/PREV command (from us or from Spotify).
+// Used to print end-to-end timing of track changes.
+std::atomic<uint64_t> gLastSkipCommandMs(0);
 
 std::mutex gNowPlayingMutex;
 SpotifyNowPlaying gNowPlaying = {};
@@ -190,9 +202,19 @@ class PlayerPumpTask : public bell::Task {
               gNowPlaying.is_playing = paused ? 0 : 1;
               break;
             }
-            case cspot::SpircHandler::EventType::TRACK_INFO:
-              setNowPlayingTrack(std::get<cspot::TrackInfo>(event->data));
+            case cspot::SpircHandler::EventType::TRACK_INFO: {
+              auto trackInfo = std::get<cspot::TrackInfo>(event->data);
+              uint64_t cmdMs = gLastSkipCommandMs.load();
+              if (cmdMs != 0) {
+                printf("SpotifyClient: TRACK_INFO '%s' arrived %llu ms after skip command\n",
+                       trackInfo.name.c_str(),
+                       (unsigned long long)(monotonic_ms() - cmdMs));
+              } else {
+                printf("SpotifyClient: TRACK_INFO '%s'\n", trackInfo.name.c_str());
+              }
+              setNowPlayingTrack(trackInfo);
               break;
+            }
             case cspot::SpircHandler::EventType::SEEK: {
               int positionMs = std::get<int>(event->data);
               {
@@ -214,11 +236,24 @@ class PlayerPumpTask : public bell::Task {
               centralAudioBuffer->clearBuffer();
               needsPrebuffer = true;
               {
+                uint64_t cmdMs = gLastSkipCommandMs.load();
+                if (cmdMs != 0) {
+                  printf("SpotifyClient: PLAYBACK_START %llu ms after skip command\n",
+                         (unsigned long long)(monotonic_ms() - cmdMs));
+                }
                 std::scoped_lock lock(gNowPlayingMutex);
                 gNowPlaying.is_playing = 1;
                 gNowPlaying.is_connected = 1;
                 gNowPlaying.position_secs = 0.0f;
               }
+              break;
+            case cspot::SpircHandler::EventType::NEXT:
+              printf("SpotifyClient: NEXT command received\n");
+              gLastSkipCommandMs.store(monotonic_ms());
+              break;
+            case cspot::SpircHandler::EventType::PREV:
+              printf("SpotifyClient: PREV command received\n");
+              gLastSkipCommandMs.store(monotonic_ms());
               break;
             case cspot::SpircHandler::EventType::DEPLETED:
               playlistEnd = true;
@@ -232,6 +267,8 @@ class PlayerPumpTask : public bell::Task {
   }
 
   void runTask() override {
+    uint64_t lastStatsMs = 0;
+
     while (running) {
       try {
         if (isPaused) {
@@ -264,8 +301,31 @@ class PlayerPumpTask : public bell::Task {
           continue;
         }
 
+        // Periodic buffer stats: every ~2s log how much decoded audio we
+        // have buffered, plus how much SDL has queued. This reveals whether
+        // stutter is caused by the decoder not keeping up (buffer draining)
+        // or by the audio sink dropping data.
+        uint64_t nowMs = monotonic_ms();
+        if (nowMs - lastStatsMs >= 2000) {
+          lastStatsMs = nowMs;
+          size_t chunks = centralAudioBuffer->audioBuffer->size() /
+                          sizeof(bell::CentralAudioBuffer::AudioChunk);
+          size_t capacity = centralAudioBuffer->audioBuffer->capacity() /
+                            sizeof(bell::CentralAudioBuffer::AudioChunk);
+          printf("SpotifyClient: buffer stats central=%zu/%zu chunks, sdl_queued=%u bytes\n",
+                 chunks, capacity,
+                 SDL_GetQueuedAudioSize(
+                     static_cast<SwitchAudioSink*>(audioSink.get())->deviceId));
+        }
+
         if (lastHash != chunk->trackHash) {
           lastHash = chunk->trackHash;
+          uint64_t cmdMs = gLastSkipCommandMs.load();
+          if (cmdMs != 0) {
+            printf("SpotifyClient: first audio chunk of new track fed to sink %llu ms after skip command\n",
+                   (unsigned long long)(monotonic_ms() - cmdMs));
+            gLastSkipCommandMs.store(0);
+          }
           handler->notifyAudioReachedPlayback();
         }
 
@@ -675,9 +735,15 @@ void spotify_client_toggle_pause(void) {
 }
 
 void spotify_client_next(void) {
-  if (gHandler) gHandler->nextSong();
+  if (!gHandler) return;
+  printf("SpotifyClient: user pressed NEXT\n");
+  gLastSkipCommandMs.store(monotonic_ms());
+  gHandler->nextSong();
 }
 
 void spotify_client_prev(void) {
-  if (gHandler) gHandler->previousSong();
+  if (!gHandler) return;
+  printf("SpotifyClient: user pressed PREV\n");
+  gLastSkipCommandMs.store(monotonic_ms());
+  gHandler->previousSong();
 }

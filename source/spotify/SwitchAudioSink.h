@@ -17,10 +17,12 @@ class SwitchAudioSink : public AudioSink {
   bool setParams(uint32_t sampleRate, uint8_t channelCount,
                  uint8_t bitDepth) override;
 
+  // Exposed for diagnostics (buffer stats logging).
+  SDL_AudioDeviceID deviceId = 0;
+
  private:
   void openDevice();
 
-  SDL_AudioDeviceID deviceId = 0;
   uint32_t sampleRate = 44100;
   uint8_t channelCount = 2;
   uint8_t bitDepth = 16;
