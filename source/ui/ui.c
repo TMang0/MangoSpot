@@ -1,7 +1,11 @@
+#include <stdio.h>
 #include "ui.h"
 #include "library.h"
 #include "album.h"
 #include "now_playing.h"
+#include "settings.h"
+#include "credits.h"
+#include "utils/lang.h"
 #include "../spotify/SpotifyClient.h"
 
 void ui_init(UIState* ui, Player* player) {
@@ -10,10 +14,14 @@ void ui_init(UIState* ui, Player* player) {
     ui->library_selected    = 0;
     ui->album_selected      = 0;
     ui->mini_player_focused = 0;
+    ui->settings_selected   = 0;
+    ui->settings_highlight_y = 186.0f;  // y inicial alineado con la primera opción (200 - 14)
+    lang_set_language(LANG_EN);
 }
 
-void ui_update(UIState* ui, u64 held, u64 down) {
+void ui_update(UIState* ui, u64 held, u64 down, float delta) {
     (void)held;
+    (void)delta;
 
     // Solo la pantalla grande del reproductor tiene su propia navegación.
     if (ui->active == SCREEN_NOW_PLAYING) {
@@ -21,8 +29,16 @@ void ui_update(UIState* ui, u64 held, u64 down) {
         return;
     }
 
-    // Bajar al mini player con Abajo desde la pantalla de bienvenida.
-    if (!ui->mini_player_focused && (down & HidNpadButton_Down)) {
+    // Y → abrir el reproductor siempre, sin depender del hover del mini player.
+    if (down & HidNpadButton_Y) {
+        ui->active = SCREEN_NOW_PLAYING;
+        return;
+    }
+
+    // Bajar al mini player con Abajo solo desde la biblioteca.
+    // En Settings/Credits el botón Abajo se usa para navegar el menú.
+    if (ui->active == SCREEN_LIBRARY && !ui->mini_player_focused &&
+        (down & HidNpadButton_Down)) {
         ui->mini_player_focused = 1;
         return;
     }
@@ -49,9 +65,6 @@ void ui_update(UIState* ui, u64 held, u64 down) {
             if (np.is_connected) spotify_client_prev();
             else player_prev(ui->player);
         }
-        // Y → abrir now playing
-        if (down & HidNpadButton_Y)
-            ui->active = SCREEN_NOW_PLAYING;
         return;
     }
 
@@ -63,6 +76,12 @@ void ui_update(UIState* ui, u64 held, u64 down) {
             break;
         case SCREEN_ALBUM:
             album_update(ui, down);
+            break;
+        case SCREEN_SETTINGS:
+            settings_update(ui, down, delta);
+            break;
+        case SCREEN_CREDITS:
+            credits_update(ui, down);
             break;
         default:
             break;
@@ -80,10 +99,19 @@ void ui_draw(UIState* ui, RenderCtx* ctx) {
         case SCREEN_NOW_PLAYING:
             now_playing_draw(ui, ctx);
             break;
+        case SCREEN_SETTINGS:
+            settings_draw(ui, ctx);
+            break;
+        case SCREEN_CREDITS:
+            credits_draw(ui, ctx);
+            break;
     }
 
-    if (ui->active != SCREEN_NOW_PLAYING)
+    if (ui->active != SCREEN_NOW_PLAYING &&
+        ui->active != SCREEN_SETTINGS &&
+        ui->active != SCREEN_CREDITS) {
         ui_draw_mini_player(ui, ctx);
+    }
 }
 
 void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
@@ -112,8 +140,8 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
             is_playing = (p->state == PLAYER_PLAYING);
             progress_pct = player_progress_pct(p);
         } else {
-            title  = "No conectado";
-            artist = "Abre Spotify y elige MangoSpot";
+            title  = lang_get(LK_NOT_CONNECTED);
+            artist = lang_get(LK_OPEN_SPOTIFY_CHOOSE_MANGOSPOT);
             album_initial = '?';
             is_playing = 0;
             progress_pct = 0.0f;
@@ -153,18 +181,50 @@ void ui_draw_mini_player(UIState* ui, RenderCtx* ctx) {
     render_text(ctx, artist, margin + 68, y + 40, muted, ctx->font_small);
 
     // Controles
-    int ctrl_x = SCREEN_W - 220;
+    char pause_label[16];
+    snprintf(pause_label, sizeof(pause_label), "(A) %s",
+        lang_get(is_playing ? LK_PAUSE_ICON : LK_PLAY_ICON));
+
+    int ctrl_x = SCREEN_W - 250;
     render_text(ctx, "[L]", ctrl_x,       y + 28, muted,  ctx->font_small);
-    render_text(ctx,
-        is_playing ? "||" : ">",
-        ctrl_x + 60,  y + 24, green,  ctx->font_bold);
-    render_text(ctx, "[R]", ctrl_x + 120, y + 28, muted,  ctx->font_small);
+    render_text(ctx, pause_label,
+        ctrl_x + 50,  y + 22, green,  ctx->font_bold);
+    render_text(ctx, "[R]", ctrl_x + 150, y + 28, muted,  ctx->font_small);
 
     // Hint cuando está enfocado
     if (ui->mini_player_focused)
-        render_text_centered(ctx, "[Y] Abrir | [A] Play/Pause | [L/R] Skip",
+        render_text_centered(ctx, lang_get(LK_MINI_PLAYER_HINT),
             0, y - 24, SCREEN_W, muted, ctx->font_small);
 
     // Barra de progreso
     render_bar(ctx, 0, y - 3, SCREEN_W, 3, progress_pct, bar_bg, green);
+}
+
+void ui_draw_gear_button(RenderCtx* ctx, int x, int y, int size, SDL_Color color) {
+    int cx = x + size / 2;
+    int cy = y + size / 2;
+    int r  = size / 2;
+
+    // Centro de la tuerca.
+    int core = (int)(r * 0.70f);
+    int core_x = cx - core / 2;
+    int core_y = cy - core / 2;
+    render_rect_rounded(ctx, core_x, core_y, core, core, core / 4, color);
+
+    // Dientes.
+    int tw = (int)(r * 0.22f);
+    int th = (int)(r * 0.32f);
+    int tr = (int)(r * 0.72f);
+
+    // Posiciones aproximadas de 8 dientes alrededor del centro.
+    int dirs[8][2] = {
+        { 1,  0}, { 1,  1}, { 0,  1}, {-1,  1},
+        {-1,  0}, {-1, -1}, { 0, -1}, { 1, -1},
+    };
+
+    for (int i = 0; i < 8; i++) {
+        int tx = cx + (dirs[i][0] * tr * 7) / 10 - tw / 2;
+        int ty = cy + (dirs[i][1] * tr * 7) / 10 - th / 2;
+        render_rect_rounded(ctx, tx, ty, tw, th, tw / 4, color);
+    }
 }

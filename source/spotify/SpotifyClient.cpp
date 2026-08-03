@@ -20,6 +20,7 @@
 
 #include <SDL2/SDL_mixer.h>
 
+#include "AccessKeyFetcher.h"
 #include "BellDSP.h"
 #include "BellLogger.h"
 #include "BellTask.h"
@@ -83,8 +84,61 @@ inline uint64_t monotonic_ms() {
 // Used to print end-to-end timing of track changes.
 std::atomic<uint64_t> gLastSkipCommandMs(0);
 
+// Spotify tracks have two identifiers:
+// - GID: 16 raw bytes, represented as a 32-char hex string internally by cspot.
+// - Spotify ID: 22-character base62 string, used by the public Web API.
+// The Web API /v1/me/tracks endpoint expects the Spotify ID, not the GID.
+static std::string hexToSpotifyId(const std::string& hex) {
+  if (hex.size() != 32) return "";
+
+  // Hex string -> big-endian byte vector.
+  std::vector<uint8_t> bytes;
+  bytes.reserve(16);
+  for (size_t i = 0; i < hex.size(); i += 2) {
+    unsigned int byte = 0;
+    std::sscanf(hex.substr(i, 2).c_str(), "%x", &byte);
+    bytes.push_back(static_cast<uint8_t>(byte));
+  }
+
+  // Big number base conversion: bytes (base 256) -> base62.
+  static const char alphabet[] =
+      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  std::string result;
+  while (!bytes.empty()) {
+    uint16_t remainder = 0;
+    std::vector<uint8_t> quotient;
+    for (uint8_t b : bytes) {
+      remainder = (remainder << 8) | b;
+      uint8_t q = remainder / 62;
+      remainder = remainder % 62;
+      if (!quotient.empty() || q != 0) {
+        quotient.push_back(q);
+      }
+    }
+    result.push_back(alphabet[remainder]);
+    bytes = std::move(quotient);
+  }
+  std::reverse(result.begin(), result.end());
+
+  // Spotify IDs are exactly 22 characters, left-pad with '0' if needed.
+  if (result.size() < 22) {
+    result = std::string(22 - result.size(), '0') + result;
+  }
+  return result;
+}
+
 std::mutex gNowPlayingMutex;
 SpotifyNowPlaying gNowPlaying = {};
+
+// Access to the cspot context is needed for Web API calls (e.g. liked tracks).
+// Set once during startup when the session is established.
+std::mutex gContextMutex;
+std::shared_ptr<cspot::Context> gContextForApi;
+
+// Shared AccessKeyFetcher for Web API calls (liked tracks). The same token is
+// used by TrackQueue for CDN storage-resolve, and its scopes include
+// user-library-read / user-library-modify, so it also works for v1/me/tracks.
+std::shared_ptr<cspot::AccessKeyFetcher> gAccessKeyFetcher;
 
 // Cover art: downloaded on its own thread (CoverArtFetchTask, below) and
 // handed off here for the render layer to pick up (spotify_client_take_
@@ -138,6 +192,8 @@ void setNowPlayingTrack(const cspot::TrackInfo& track) {
              track.artist.c_str());
     snprintf(gNowPlaying.album, sizeof(gNowPlaying.album), "%s",
              track.album.c_str());
+    snprintf(gNowPlaying.track_id, sizeof(gNowPlaying.track_id), "%s",
+             track.trackId.c_str());
     gNowPlaying.duration_ms = track.duration;
     gNowPlaying.position_secs = 0.0f;
   }
@@ -148,6 +204,15 @@ void setNowPlayingTrack(const cspot::TrackInfo& track) {
     gLastCoverArtUrl = track.imageUrl;
     new CoverArtFetchTask(track.imageUrl);
   }
+}
+
+// Clears the pending cover art so the UI stops showing the previous track's
+// image while a track change is in flight. Called optimistically on NEXT/PREV.
+void clearPendingCoverArt() {
+  std::scoped_lock lock(gCoverArtMutex);
+  gCoverArtPendingBytes.clear();
+  gCoverArtPending = false;
+  gLastCoverArtUrl.clear();
 }
 
 // Pumps the raw network connection: reads + decrypts packets off the wire.
@@ -565,10 +630,17 @@ class ZeroconfHttpServer : public bell::Task {
     }
 
     if (method == "POST") {
-      size_t clPos = request.find("Content-Length:");
+      // HTTP headers are case-insensitive (RFC 7230). Spotify's mobile app
+      // has been observed sending 'content-length' lowercase, so scan both.
       size_t contentLength = 0;
-      if (clPos != std::string::npos) {
-        contentLength = std::strtoul(request.c_str() + clPos + 15, nullptr, 10);
+      for (const char* headerName : {"Content-Length:", "content-length:"}) {
+        size_t clPos = request.find(headerName);
+        if (clPos != std::string::npos) {
+          contentLength =
+              std::strtoul(request.c_str() + clPos + strlen(headerName),
+                           nullptr, 10);
+          break;
+        }
       }
 
       std::string body = request.substr(headerEnd + 4);
@@ -578,7 +650,15 @@ class ZeroconfHttpServer : public bell::Task {
         body.append(buf, n);
       }
 
+      printf("SpotifyClient: POST body length=%zu, contentLength=%zu\n",
+             body.size(), contentLength);
+
       auto queryMap = parseFormBody(body);
+      for (const auto& kv : queryMap) {
+        printf("SpotifyClient: POST field '%s' = %zu bytes\n",
+               kv.first.c_str(), kv.second.size());
+      }
+
       blob->loadZeroconfQuery(queryMap);
       paired = true;
 
@@ -668,6 +748,10 @@ class LoginCompletionTask : public bell::Task {
 
       std::scoped_lock lock(gNowPlayingMutex);
       gNowPlaying.is_connected = 1;
+      // Keep a reference for Web API calls (add/remove liked tracks).
+      std::scoped_lock apiLock(gContextMutex);
+      gContextForApi = gContext;
+      gAccessKeyFetcher = std::make_shared<cspot::AccessKeyFetcher>(gContext);
     } catch (const std::exception& e) {
       printf("SpotifyClient: exception after pairing: %s\n", e.what());
     } catch (...) {
@@ -702,11 +786,21 @@ int spotify_client_start(void) {
 
     gZeroconfServer =
         std::make_unique<ZeroconfHttpServer>(loginBlob, kZeroconfPort);
+    if (!gZeroconfServer) {
+      printf("SpotifyClient: failed to create Zeroconf HTTP server\n");
+      return 3;
+    }
 
     gMdnsService = bell::MDNSService::registerService(
         loginBlob->getDeviceName(), "_spotify-connect", "_tcp", "",
         kZeroconfPort,
         {{"VERSION", "1.0"}, {"CPath", "/spotify_info"}, {"Stack", "SP"}});
+    if (!gMdnsService) {
+      printf(
+          "SpotifyClient: mDNS service registration failed - MangoSpot will "
+          "not appear in Spotify\n");
+      return 3;
+    }
 
     gLoginCompletionTask = std::make_unique<LoginCompletionTask>(
         loginBlob, gZeroconfServer.get());
@@ -765,10 +859,10 @@ void spotify_client_toggle_pause(void) {
     std::scoped_lock lock(gNowPlayingMutex);
     if (!gNowPlaying.is_connected) return;
     currentlyPlaying = gNowPlaying.is_playing != 0;
+    // Optimistic update: flip the local UI state immediately so the user
+    // gets instant feedback, even before Spotify's PLAY_PAUSE event arrives.
+    gNowPlaying.is_playing = currentlyPlaying ? 0 : 1;
   }
-  // setPause(true) pauses, setPause(false) resumes - so pass whether we're
-  // currently playing to flip it. This synchronously fires the PLAY_PAUSE
-  // event back through our handler, which updates gNowPlaying.is_playing.
   gHandler->setPause(currentlyPlaying);
 }
 
@@ -776,6 +870,19 @@ void spotify_client_next(void) {
   if (!gHandler) return;
   printf("SpotifyClient: user pressed NEXT\n");
   gLastSkipCommandMs.store(monotonic_ms());
+  {
+    std::scoped_lock lock(gNowPlayingMutex);
+    // Optimistic update: clear title/artist briefly so the UI shows a
+    // "loading next track" state immediately instead of the old track until
+    // Spotify sends TRACK_INFO/PLAYBACK_START.
+    gNowPlaying.title[0] = '\0';
+    gNowPlaying.artist[0] = '\0';
+    gNowPlaying.album[0] = '\0';
+    gNowPlaying.position_secs = 0.0f;
+  }
+  // Also drop any stale cover art so the previous image isn't frozen while
+  // the next track loads.
+  clearPendingCoverArt();
   gHandler->nextSong();
 }
 
@@ -783,5 +890,100 @@ void spotify_client_prev(void) {
   if (!gHandler) return;
   printf("SpotifyClient: user pressed PREV\n");
   gLastSkipCommandMs.store(monotonic_ms());
+  {
+    std::scoped_lock lock(gNowPlayingMutex);
+    // cspot's previousSong() restarts the current track when we're past
+    // ~3s, and goes to the previous track only when near the start. Don't
+    // clear title/artist optimistically here: if it restarts the same
+    // track, no TRACK_INFO event is emitted and the UI would stay on
+    // "Changing song..." forever. Just reset the local position.
+    gNowPlaying.position_secs = 0.0f;
+  }
   gHandler->previousSong();
+}
+
+// Background task that calls Spotify's Web API to add or remove the current
+// track from the user's library. The local is_liked flag is flipped before
+// the request is fired so the UI feels instant.
+class ToggleLikeTask : public bell::Task {
+ public:
+  ToggleLikeTask(std::shared_ptr<cspot::AccessKeyFetcher> fetcher,
+                 std::string trackId, bool add)
+      : bell::Task("spotify_like", 1024 * 16, 0, 0),
+        fetcher(std::move(fetcher)),
+        trackId(std::move(trackId)),
+        add(add) {
+    startTask();
+  }
+
+  void runTask() override {
+    try {
+      std::string token = fetcher->getAccessKey();
+      if (token.empty()) {
+        printf("SpotifyClient: no access token, can't toggle like\n");
+        return;
+      }
+
+      bell::HTTPClient::Headers headers = {
+          {"Authorization", "Bearer " + token},
+          {"Content-Type", "application/json"}};
+
+      std::string spotifyId = hexToSpotifyId(trackId);
+      if (spotifyId.empty()) {
+        printf("SpotifyClient: invalid track GID '%s', can't toggle like\n",
+               trackId.c_str());
+        return;
+      }
+
+      printf("SpotifyClient: toggle like %s trackId=%s spotifyId=%s\n",
+             add ? "add" : "remove", trackId.c_str(), spotifyId.c_str());
+
+      std::string url =
+          "https://api.spotify.com/v1/me/tracks?ids=" + spotifyId;
+
+      std::unique_ptr<bell::HTTPClient::Response> response;
+      if (add) {
+        response = bell::HTTPClient::put(url, headers);
+      } else {
+        response = bell::HTTPClient::del(url, headers);
+      }
+
+      printf("SpotifyClient: toggle like %s response status %d\n",
+             add ? "add" : "remove",
+             response ? response->status() : -1);
+    } catch (const std::exception& e) {
+      printf("SpotifyClient: toggle like exception: %s\n", e.what());
+    } catch (...) {
+      printf("SpotifyClient: toggle like unknown exception\n");
+    }
+    delete this;
+  }
+
+ private:
+  std::shared_ptr<cspot::AccessKeyFetcher> fetcher;
+  std::string trackId;
+  bool add;
+};
+
+void spotify_client_toggle_like(void) {
+  std::shared_ptr<cspot::Context> ctx;
+  std::shared_ptr<cspot::AccessKeyFetcher> fetcher;
+  std::string trackId;
+  bool add;
+  {
+    std::scoped_lock lock(gNowPlayingMutex);
+    std::scoped_lock apiLock(gContextMutex);
+    if (!gNowPlaying.is_connected || !gContextForApi || !gAccessKeyFetcher ||
+        gNowPlaying.track_id[0] == '\0') {
+      return;
+    }
+    ctx = gContextForApi;
+    fetcher = gAccessKeyFetcher;
+    trackId = gNowPlaying.track_id;
+    add = gNowPlaying.is_liked == 0;
+    gNowPlaying.is_liked = add ? 1 : 0;
+  }
+  printf("SpotifyClient: user toggled like (now %s)\n",
+         add ? "liked" : "unliked");
+  new ToggleLikeTask(fetcher, trackId, add);
 }

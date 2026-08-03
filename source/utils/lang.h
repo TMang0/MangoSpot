@@ -1,0 +1,50 @@
+#pragma once
+
+typedef enum {
+    LANG_EN = 0,
+    LANG_ES,
+    LANG_PT,
+    LANG_COUNT
+} Language;
+
+typedef enum {
+    LK_WELCOME_TO = 0,
+    LK_CONNECT_FROM_SPOTIFY,
+    LK_TO_START_PLAYING,
+    LK_OPEN_DEVICES_MENU,
+    LK_PRESS_DOWN_TO_FOCUS_MINI_PLAYER,
+    LK_AND_USE_A_PAUSE_L_R_SKIP,
+    LK_OPEN_PLAYER,
+    LK_EXIT,
+    LK_NO_ACTIVE_PLAYBACK,
+    LK_CONNECT_FROM_SPOTIFY_AND_SELECT_DEVICE,
+    LK_BACK,
+    LK_BACK_TO_LIBRARY,
+    LK_PREV_TRACK,
+    LK_NEXT_TRACK,
+    LK_PAUSE_ICON,
+    LK_PLAY_ICON,
+    LK_NOT_CONNECTED,
+    LK_OPEN_SPOTIFY_CHOOSE_MANGOSPOT,
+    LK_MINI_PLAYER_HINT,
+    LK_CHANGING_SONG,
+    LK_SETTINGS,
+    LK_LANGUAGE,
+    LK_CREDITS,
+    LK_CREDITS_MADE_BY,
+    LK_CREDITS_WITH_LOVE,
+    LK_CREDITS_GITHUB,
+    LK_CREDITS_REPOS,
+    LK_CREDITS_INSPIRATION,
+    LK_ENGLISH,
+    LK_SPANISH,
+    LK_PORTUGUESE,
+    LK_ADD_TO_FAVORITES,
+    LK_REMOVE_FROM_FAVORITES,
+    LK_COUNT
+} LangKey;
+
+void        lang_set_language(Language lang);
+Language    lang_get_language(void);
+const char* lang_get(LangKey key);
+const char* lang_name(Language lang);

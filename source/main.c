@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_QUIT) goto done;
         }
 
-        ui_update(&ui, held, down);
+        ui_update(&ui, held, down, delta);
         player_update(&player, delta);
         spotify_client_advance_playback(delta);
 

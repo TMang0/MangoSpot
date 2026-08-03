@@ -259,4 +259,138 @@ moderno en Rust). La única alternativa real que sigue funcionando es
 Ya no hace falta el archivo `login.txt` en la SD — ese flujo fue eliminado
 por completo.
 
+---
+
+## Investigación: token de Web API disponible vía Connect (2026-08-03)
+
+Durante la implementación de "Agregar a favoritos" se descubrió que
+`cspot` ya obtiene un **access token de Spotify asociado a la cuenta del
+usuario** durante el flujo de Connect. El token se pide en
+`AccessKeyFetcher::updateAccessKey()` (login5.spotify.com) con estos
+scopes:
+
+```cpp
+"streaming,user-library-read,user-library-modify,user-top-read,user-read-recently-played"
+```
+
+El mismo token que `TrackQueue` usa para pedir la URL del CDN
+(`api.spotify.com/v1/storage-resolve/files/audio/interactive/...`) sirve
+para llamar a la **Web API de Spotify**, porque los scopes incluyen
+`user-library-read` y `user-library-modify`. Esto permitió implementar
+`PUT/DELETE https://api.spotify.com/v1/me/tracks?ids=<track_id>` para
+agregar/quitar la canción actual de favoritos sin ningún flujo OAuth
+adicional.
+
+### Implicaciones a futuro (sin cambios planeados aún)
+
+Dado que el token pertenece a la cuenta del usuario y tiene scopes de
+biblioteca y reproducción, Spotify Connect deja de ser la única forma de
+usar MangoSpot. Sería posible construir un **cliente nativo completo** que:
+
+- Busque tracks, álbumes, artistas y playlists (`/v1/search`).
+- Liste las listas guardadas del usuario (`/v1/me/playlists`).
+- Muestre las canciones favoritas (`/v1/me/tracks`).
+- Reproduzca directamente desde la biblioteca del usuario sin depender del
+celular/PC.
+- Use Connect como un "modo adicional" (elegir MangoSpot como dispositivo
+desde otra app).
+
+Esto es solo investigación por ahora; no hay cambios de arquitectura
+planificados todavía. Spotify Connect sigue siendo el modo principal y el
+Web API se usa hoy solo para favoritos.
+
+---
+
+## Fixes de conexión y arranque (2026-08-03)
+
+Sesión dedicada a una regresión ("Spotify reconoce la Switch pero se queda
+en *Conectando a MangoSpot*") y, una vez resuelta, a por qué tardaba ~20s en
+empezar a sonar.
+
+### Bug raíz: `HTTPClient` de bell devolvía bodies vacíos
+
+Síntoma: tras el pairing, la sesión conectaba y los controles
+(play/pausa/next) funcionaban, pero la canción nunca arrancaba. El log
+mostraba `apresolve status=200 body_len=0`, `login5 ... body_len=0` →
+`Failed to fetch access token` → `Track failed to load, skipping it`.
+
+Clave del diagnóstico: los controles viajan por el canal Mercury/Shannon
+(TCP crudo), que funcionaba bien; **solo** las llamadas HTTPS REST
+(ApResolve, token de acceso, URL del CDN) volvían con el cuerpo vacío.
+
+Causa: una edición local previa a
+`external/cspot/cspot/bell/main/io/HTTPClient.cpp` había borrado, en
+`readResponseHeaders()`, el bucle que copia los headers parseados por
+picohttpparser al vector `responseHeaders`. Como `header()` solo lee ese
+vector, `header("content-length")` siempre devolvía `""`, `contentSize`
+quedaba en 0 y `readRawBody()` no leía nada → todos los bodies HTTPS
+vacíos. Se encontró con
+`git -C external/cspot/cspot/bell diff HEAD -- main/io/HTTPClient.cpp`.
+
+Fix: se restauró el bucle de copia de headers y, además, `readRawBody()`
+ahora lee en loop hasta completar el `Content-Length` (un solo record TLS
+puede ser más chico que el body).
+
+### Fixes secundarios de pairing/descubrimiento
+
+- **`Content-Length` en minúscula**: algunos clientes de Spotify mandan
+  `content-length:` en minúsculas en el POST de Zeroconf. El parser HTTP
+  hecho a mano solo buscaba `Content-Length:`, leía un body de largo 0 y
+  `createFromBlob` tiraba un error de JSON. Ahora se busca sin distinguir
+  mayúsculas.
+- **IP aún no lista al arrancar**: `nifmGetCurrentIpAddress()` puede
+  devolver 0 justo al bootear (Wi-Fi todavía sin dirección), con lo que el
+  responder mDNS no registraba nada y MangoSpot no aparecía. Ahora se
+  reintenta la obtención de IP por unos segundos.
+- **Anuncios proactivos con meta-PTR**: se incluye el PTR de enumeración
+  DNS-SD (`_services._dns-sd._udp.local`) en una ráfaga inicial de anuncios,
+  para que los browsers pasivos descubran el dispositivo aunque no consulten
+  directamente el tipo de servicio.
+- **Fallback de ApResolve**: si `apresolve.spotify.com` falla o responde
+  vacío, se usa un access point conocido (`ap.spotify.com:4070`) en vez de
+  quedar colgado.
+
+### Arranque lento (~20s hasta el primer audio): era contención, no crypto
+
+Se instrumentó con timestamps cada handshake TLS (`TLSSocket::open`) y cada
+request HTTPS (ApResolve / AccessKeyFetcher / storage-resolve). Los datos de
+hardware **descartaron** la hipótesis de "el ECDHE por software es lento":
+
+- Handshakes sin contención: `apresolve` 269ms, `login5` 246ms — rápidos.
+- La **misma** operación bajo carga: `api.spotify.com` 2688ms, CDN
+  `audio-ak` 3881ms, e incluso el `tcp_connect` (red pura, sin crypto)
+  llegó a 2042ms.
+
+Mismo servidor, misma CPU, 246ms vs 2688ms ⇒ no es CPU-bound, es
+**contención** de Wi-Fi + CPU. Mecanismo: apenas la pista 0 quedaba lista,
+cspot arrancaba a precargar hasta 5 pistas (`MAX_TRACKS_PRELOAD`), cada una
+con su handshake TLS a `api.spotify.com`, justo mientras la pista 0 abría su
+propio stream de audio. Todo competía por el enlace y la CPU.
+
+Nota sobre "hardware acceleration": libnx solo expone AES/SHA por hardware
+(simétrico); no hay RSA/ECC, y mbedTLS ya usa ensamblador aarch64 para el
+bignum. Es decir, acelerar crypto no ayudaría al handshake (que es
+asimétrico) — el problema era la contención, no la velocidad del cifrado.
+
+Fixes aplicados:
+
+- **Precarga en dos fases (ventana rodante)** en
+  `external/cspot/cspot/src/TrackQueue.cpp` + `include/TrackQueue.h`:
+  durante un periodo de gracia tras quedar lista la primera pista, la
+  ventana se limita a `INITIAL_TRACKS_PRELOAD = 2` (la pista 0 arranca sin
+  competencia); pasado ese periodo crece a `MAX_TRACKS_PRELOAD = 4` (antes
+  5) y se rellena **de a una pista por vez** a medida que se consumen
+  durante la reproducción (solo pide la siguiente cuando la anterior ya
+  cargó, evitando ráfagas).
+- **Timeout de carga de pista** en `TrackPlayer.cpp` de 5s → 20s, para que
+  la primera pista cargue al primer intento en vez de descartarse y
+  reintentar (un handshake TLS frío en la Switch puede pasar de 5s
+  legítimamente).
+- Se dejaron los logs de timing (TLS/ApResolve/login5/storage-resolve) como
+  instrumentación útil para futuras mediciones.
+
+Detalle interno completo (con los números de handshake y el análisis) en la
+memoria de repo `cspot-build-notes.md`.
+
+
 

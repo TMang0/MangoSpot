@@ -1,5 +1,6 @@
 #include "now_playing.h"
 #include <stdio.h>
+#include "utils/lang.h"
 #include "../spotify/SpotifyClient.h"
 
 void now_playing_update(UIState* ui, u64 down) {
@@ -16,6 +17,8 @@ void now_playing_update(UIState* ui, u64 down) {
             spotify_client_next();
         if ((down & HidNpadButton_ZL) || (down & HidNpadButton_L))
             spotify_client_prev();
+        if (down & HidNpadButton_X)
+            spotify_client_toggle_like();
     } else {
         // Play/pause con A
         if (down & HidNpadButton_A)
@@ -56,6 +59,16 @@ void now_playing_draw(UIState* ui, RenderCtx* ctx) {
         total_secs = (int)(np.duration_ms / 1000);
         cur_secs   = (int)np.position_secs;
         progress_pct = total_secs > 0 ? (np.position_secs / (float)total_secs) : 0.0f;
+
+        // Estado optimista: mientras el comando viaja a Spotify, el título
+        // queda vacío; mostramos un indicador de "cambiando" en lugar de
+        // dejar la canción anterior congelada en pantalla.
+        if (title[0] == '\0') {
+            title  = lang_get(LK_CHANGING_SONG);
+            artist = "";
+            progress_pct = 0.0f;
+            cur_secs = 0;
+        }
     } else {
         Player* p = ui->player;
         Song*   s = p->current_song;
@@ -65,11 +78,11 @@ void now_playing_draw(UIState* ui, RenderCtx* ctx) {
             SDL_Color muted = {179, 179, 179, 255};
             SDL_Color green = {30,  215, 96,  255};
             render_text_centered(ctx, "MangoSpot", 0, 260, SCREEN_W, green, ctx->font_bold);
-            render_text_centered(ctx, "No hay reproducción activa",
+            render_text_centered(ctx, lang_get(LK_NO_ACTIVE_PLAYBACK),
                 0, 340, SCREEN_W, muted, ctx->font_regular);
-            render_text_centered(ctx, "Conéctate desde Spotify y selecciona este dispositivo",
+            render_text_centered(ctx, lang_get(LK_CONNECT_FROM_SPOTIFY_AND_SELECT_DEVICE),
                 0, 380, SCREEN_W, muted, ctx->font_small);
-            render_text_centered(ctx, "[B] Volver",
+            render_text_centered(ctx, lang_get(LK_BACK),
                 0, 520, SCREEN_W, muted, ctx->font_small);
             return;
         }
@@ -126,12 +139,24 @@ void now_playing_draw(UIState* ui, RenderCtx* ctx) {
 
     // Controles
     int ctrl_y = bar_y + 48;
-    const char* pause_label = is_playing ? "||" : ">";
-    render_text_centered(ctx, "<< [L/ZL]", 60,            ctrl_y, 220,  white, ctx->font_regular);
-    render_text_centered(ctx, pause_label,  SCREEN_W/2-30, ctrl_y, 60,   green, ctx->font_bold);
-    render_text_centered(ctx, "[R/ZR] >>", SCREEN_W-280,  ctrl_y, 220,  white, ctx->font_regular);
+    char pause_label[16];
+    snprintf(pause_label, sizeof(pause_label), "(A) %s",
+        lang_get(is_playing ? LK_PAUSE_ICON : LK_PLAY_ICON));
+    render_text_centered(ctx, lang_get(LK_PREV_TRACK), 60,            ctrl_y, 220,  white, ctx->font_regular);
+    render_text_centered(ctx, pause_label,  SCREEN_W/2-30, ctrl_y, 100,  green, ctx->font_bold);
+    render_text_centered(ctx, lang_get(LK_NEXT_TRACK), SCREEN_W-280,  ctrl_y, 220,  white, ctx->font_regular);
+
+    // Favoritos
+    int fav_y = ctrl_y + 44;
+    const char* fav_label = np.is_connected
+        ? lang_get(np.is_liked ? LK_REMOVE_FROM_FAVORITES : LK_ADD_TO_FAVORITES)
+        : "";
+    if (fav_label[0]) {
+        render_text_centered(ctx, fav_label, 0, fav_y, SCREEN_W,
+            np.is_liked ? (SDL_Color){255, 90, 90, 255} : muted, ctx->font_small);
+    }
 
     // Hint
-    render_text_centered(ctx, "[B] Volver a biblioteca",
+    render_text_centered(ctx, lang_get(LK_BACK_TO_LIBRARY),
         0, SCREEN_H - 100, SCREEN_W, muted, ctx->font_small);
 }

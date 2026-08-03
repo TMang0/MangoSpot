@@ -9,7 +9,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET      := mangospot
 BUILD       := build
-SOURCES     := source source/ui source/player source/data source/render source/spotify
+SOURCES     := source source/ui source/player source/data source/render source/spotify source/utils
 INCLUDES    := source
 ROMFS       := $(TOPDIR)/romfs
 

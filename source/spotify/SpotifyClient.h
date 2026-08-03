@@ -11,8 +11,10 @@ typedef struct {
   char title[256];
   char artist[256];
   char album[256];
-  int is_playing;   // 1 if actively playing, 0 if paused/stopped
-  int is_connected; // 1 once login + session are up
+  char track_id[64];     // Spotify track GID as hex, for Web API calls
+  int is_playing;        // 1 if actively playing, 0 if paused/stopped
+  int is_connected;      // 1 once login + session are up
+  int is_liked;          // 1 if current track is in user's library (last known)
   uint32_t duration_ms;  // current track duration, from cspot's TrackInfo
   float position_secs;   // locally-tracked elapsed playback position
 } SpotifyNowPlaying;
@@ -45,6 +47,11 @@ void spotify_client_advance_playback(float delta);
 void spotify_client_toggle_pause(void);
 void spotify_client_next(void);
 void spotify_client_prev(void);
+
+// Toggles "liked" status for the current track using Spotify's Web API
+// (PUT/DELETE v1/me/tracks). Runs on its own thread; the local is_liked
+// flag is flipped optimistically. No-op if not connected.
+void spotify_client_toggle_like(void);
 
 // If a new cover art image has finished downloading since the last call,
 // fills *out_data with a malloc'd buffer of encoded image bytes (JPEG, as
