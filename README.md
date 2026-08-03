@@ -1,6 +1,6 @@
 # MangoSpot
 
-Nintendo Switch homebrew that turns the console into a music player with a
+NX Homebrew that turns the console into a music player with a
 local library and, in active development, a real **Spotify Connect**
 receiver.
 
